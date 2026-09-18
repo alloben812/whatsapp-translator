@@ -1,0 +1,40 @@
+[Unit]
+Description=Personal WhatsApp Russian-Serbian translator
+After=network-online.target whatsapp-translator-broker.socket
+Wants=network-online.target whatsapp-translator-broker.socket
+
+[Service]
+Type=simple
+User=whatsapp-translator
+Group=whatsapp-translator
+WorkingDirectory=/opt/whatsapp-translator/current
+EnvironmentFile=/etc/whatsapp-translator/application.env
+ExecStart=/usr/bin/flock -n /var/lib/whatsapp-translator/process.lock /opt/node-v22.23.2-linux-x64/bin/node /opt/whatsapp-translator/current/dist/src/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=85
+StateDirectory=whatsapp-translator
+StateDirectoryMode=0700
+RuntimeDirectory=whatsapp-translator
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/whatsapp-translator /run/whatsapp-translator
+MemoryMax=600M
+TasksMax=80
+# Transitive WhatsApp cryptography code can print session material directly.
+# Owner-visible error codes live in /api/state; raw stdout/stderr never enter journal.
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

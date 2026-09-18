@@ -10,6 +10,7 @@ import {
   type Transport,
 } from './domain.js';
 import { Store } from './store.js';
+import { randomBytes } from 'node:crypto';
 
 function validateText(text: string, maximumLength: number, label: string): void {
   if (typeof text !== 'string' || text.trim().length === 0 || text.length > maximumLength) {
@@ -19,7 +20,7 @@ function validateText(text: string, maximumLength: number, label: string): void 
 
 /** Single process / instance. Only explicit send() calls can reach the transport. */
 export class TranslationService {
-  private readonly contacts: ReadonlySet<string>;
+  private contacts: ReadonlySet<string> = new Set();
 
   constructor(
     private readonly store: Store,
@@ -27,6 +28,10 @@ export class TranslationService {
     private readonly transport: Transport,
     contacts: Contact[],
   ) {
+    this.setContacts(contacts);
+  }
+
+  setContacts(contacts: Contact[]): void {
     const ids = new Set<string>();
     for (const contact of contacts) {
       if (!isIndividualContactId(contact.id) || ids.has(contact.id)) {
@@ -58,18 +63,35 @@ export class TranslationService {
     if (translated.status === 'failed') return translated;
 
     // Persist intent before transport invocation. An interruption now is uncertain.
-    const sending = this.store.setState(message.id, 'sending');
+    const sending = this.store.setState(message.id, 'sending', { remoteId: '3EB0' + randomBytes(16).toString('hex').toUpperCase() });
     try {
-      const receipt = await this.transport.send(sending.contactId, sending.translatedText!);
+      const receipt = await this.transport.send(sending.contactId, sending.translatedText!, sending.remoteId!);
+      const confirmed = this.store.get(message.id)!;
+      if (['sent', 'delivered', 'read'].includes(confirmed.status)) return confirmed;
       if (!receipt || typeof receipt.messageId !== 'string' || receipt.messageId.trim() === '') {
         return this.store.setState(message.id, 'unknown', { errorCode: 'uncertain_delivery' });
       }
       // 'sent' only means the transport accepted it; it does not mean delivered/read.
       return this.store.setState(message.id, 'sent', { remoteId: receipt.messageId });
-    } catch {
+    } catch (error) {
+      const confirmed = this.store.get(message.id)!;
+      if (['sent', 'delivered', 'read'].includes(confirmed.status)) return confirmed;
+      if (error instanceof ServiceError && error.code === 'WHATSAPP_NOT_CONNECTED') {
+        return this.store.setState(message.id, 'failed', { errorCode: 'whatsapp_disconnected' });
+      }
       // Never resend automatically: WhatsApp may have accepted the message already.
       return this.store.setState(message.id, 'unknown', { errorCode: 'uncertain_delivery' });
     }
+  }
+
+  async retryIncoming(id: string): Promise<Message> {
+    const message = this.store.get(id);
+    if (!message || message.direction !== 'incoming' || message.status !== 'failed' || !this.contacts.has(message.contactId)) {
+      throw new ServiceError('retry_not_allowed', 'Only a failed incoming translation can be retried.');
+    }
+    const reserved = this.store.setState(id, 'translating', { errorCode: null });
+    const translated = await this.translate(reserved, 'sr-ru');
+    return translated.status === 'failed' ? translated : this.store.setState(id, 'received');
   }
 
   async receive(event: IncomingMessage): Promise<Message | null> {

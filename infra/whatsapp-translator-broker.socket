@@ -1,0 +1,15 @@
+[Unit]
+Description=Private subscription translation socket
+
+[Socket]
+ListenStream=/run/whatsapp-translator-broker.sock
+SocketUser=root
+SocketGroup=whatsapp-translator
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+TriggerLimitIntervalSec=60
+TriggerLimitBurst=120
+
+[Install]
+WantedBy=sockets.target

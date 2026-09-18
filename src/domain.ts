@@ -5,7 +5,7 @@ export interface Translator {
 }
 
 export interface Transport {
-  send(contactId: string, text: string): Promise<{ messageId: string }>;
+  send(contactId: string, text: string, messageId?: string): Promise<{ messageId: string }>;
 }
 
 export interface Contact {
@@ -17,6 +17,8 @@ export type MessageStatus =
   | 'translating'
   | 'sending'
   | 'sent'
+  | 'delivered'
+  | 'read'
   | 'received'
   | 'failed'
   | 'unknown';
