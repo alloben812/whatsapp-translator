@@ -218,16 +218,26 @@ class Runtime:
         provider = self.config['provider']
         user = 'mma-' + provider
         executable = '/home/mma-codex/.local/bin/codex' if provider == 'codex' else '/usr/local/bin/mma-claude'
-        result = self.command([
+        prefix = [
             '/usr/bin/setpriv', '--reuid=' + user, '--regid=' + user, '--init-groups',
             '--no-new-privs', '--inh-caps=-all', '--ambient-caps=-all',
             '/usr/bin/env', '-i', 'HOME=/home/' + user, 'PATH=/usr/local/bin:/usr/bin:/bin',
             'LANG=C.UTF-8', 'DISABLE_AUTOUPDATER=1', NODE,
-            str(self.release / 'dist/src/provider-runner.js'), '--check-auth',
+            str(self.release / 'dist/src/provider-runner.js'),
+        ]
+        arguments = [
             '--provider', provider, '--executable', executable, '--workspace', '/home/' + user,
-        ], timeout=8)
+        ]
+        result = self.command([*prefix, '--check-auth', *arguments], timeout=8)
         require(result.get('ok') is True and result.get('processStopped') is True
                 and result.get('authenticatedAccess') == 'subscription', 'auth_unavailable')
+        if provider == 'claude':
+            # The installed runner checks CLI flags before inference. Its
+            # optional-effort parser needs choices that 2.1.208 help omits, so
+            # Sonnet uses its normal default effort instead of changing MMA.
+            runtime = self.command([*prefix, '--check-runtime', *arguments], timeout=8)
+            require(runtime.get('ok') is True and runtime.get('processStopped') is True
+                    and runtime.get('streamJson') is True)
 
     def journal(self, action, payload):
         return self.command([
@@ -303,7 +313,9 @@ class Bridge:
             require(not self.cancelled)
             job = {'runId': run_id, 'task': prompt, 'role': 'implementer',
                    'provider': self.runtime.config['provider'], 'model': self.runtime.config['model'],
-                   'effort': 'low', 'workspace': workspace, 'timeoutMs': 30_000}
+                   'workspace': workspace, 'timeoutMs': 30_000}
+            if self.runtime.config['provider'] == 'codex':
+                job['effort'] = 'low'
             attempted = True  # A failed start may already have launched. Never repeat it.
             self.runtime.worker('start', run_id, '45', 'subscription', payload=job)
             while self.clock() < deadline and not self.cancelled:
@@ -315,7 +327,7 @@ class Bridge:
                             and result.get('runId') == run_id
                             and result.get('provider') == self.runtime.config['provider']
                             and result.get('model') == self.runtime.config['model']
-                            and result.get('effort') == 'low')
+                            and result.get('effort') == job.get('effort'))
                     response = result.get('response')
                     require(type(response) is str and len(response.encode()) <= 64 * 1024)
                     translated = exact(json.loads(response), ['translation'])
