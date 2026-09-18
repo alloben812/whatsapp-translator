@@ -17,3 +17,6 @@ PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 NoNewPrivileges=yes
+# Preserve the one identity-switch capability needed by setpriv under this unit.
+# The provider launcher drops ambient/inheritable capabilities before model execution.
+AmbientCapabilities=CAP_SETUID

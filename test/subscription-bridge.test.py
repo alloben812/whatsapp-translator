@@ -194,6 +194,11 @@ class BrokerTest(unittest.TestCase):
             nested.mkdir(parents=True)
             helper = nested / 'helper.js'
             helper.write_text('export const value = 1;')
+            # Developer/service umasks differ (for example 0002 on Ubuntu).
+            # Establish the intended safe fixture before testing unsafe modes.
+            nested.parent.chmod(0o755)
+            nested.chmod(0o755)
+            helper.chmod(0o644)
             original_lstat = Path.lstat
             foreign_owner = None
 
