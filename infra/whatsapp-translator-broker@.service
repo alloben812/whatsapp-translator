@@ -1,0 +1,22 @@
+[Unit]
+Description=Bounded subscription translation request
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/local/sbin/whatsapp-translation-socket
+StandardInput=socket
+StandardOutput=socket
+StandardError=null
+UMask=0077
+RuntimeMaxSec=75
+TimeoutStopSec=5
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+NoNewPrivileges=yes
+# Preserve the one identity-switch capability needed by setpriv under this unit.
+# The provider launcher drops ambient/inheritable capabilities before model execution.
+AmbientCapabilities=CAP_SETUID

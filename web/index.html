@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f4f5ef">
+    <meta name="color-scheme" content="light">
+    <title>Разговор — переводчик для WhatsApp</title>
+    <link rel="stylesheet" href="styles.css">
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <section id="login-view" class="login-view" hidden aria-labelledby="login-title">
+      <div class="login-card">
+        <span class="brand-mark" aria-hidden="true">р</span>
+        <p class="eyebrow">ВАШ ЛИЧНЫЙ ПЕРЕВОДЧИК</p>
+        <h1 id="login-title">Продолжим разговор.</h1>
+        <p class="muted">Введите пароль, чтобы открыть свои чаты.</p>
+        <form id="login-form">
+          <label for="password">Пароль</label>
+          <input id="password" name="password" type="password" required autocomplete="current-password">
+          <p id="login-error" class="form-error" role="alert" hidden></p>
+          <button id="login-button" class="button primary" type="submit">Открыть чаты <span aria-hidden="true">↗</span></button>
+        </form>
+      </div>
+    </section>
+
+    <div id="app" class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="./" aria-label="Разговор — главная">
+          <span class="brand-mark" aria-hidden="true">р</span>
+          <span><strong>разговор</strong><span class="brand-caption">WhatsApp без языкового барьера</span></span>
+        </a>
+        <div class="header-meta">
+          <span id="demo-label" class="demo-label" hidden>Демонстрация</span>
+          <span id="language-route" class="language-route">Перевод личных чатов</span>
+          <span id="connection-status" class="connection-status" role="status"><span class="status-dot" aria-hidden="true"></span><span id="connection-label">Загружаем…</span></span>
+          <button id="owner-logout" class="text-button header-logout" type="button" hidden>Выйти</button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside id="sidebar" class="sidebar" aria-label="Ваши чаты">
+          <div class="sidebar-heading"><div><p class="eyebrow">НА СВЯЗИ</p><h2>Ваши чаты <span id="contact-count">0</span></h2></div><button id="add-contact" class="icon-button add-button" type="button" aria-label="Добавить собеседника" title="Добавить собеседника">+</button></div>
+          <div id="chat-tools" class="chat-tools" hidden>
+            <input id="chat-search" type="search" autocomplete="off" placeholder="Поиск по чатам" aria-label="Поиск по чатам">
+            <button id="sync-chats" class="text-button sync-chats" type="button">Обновить чаты</button>
+          </div>
+          <p id="chat-sync-status" class="chat-sync-status" role="status" hidden></p>
+          <div id="contact-list" class="contact-list"></div>
+          <div id="empty-contacts" class="empty-contacts"><span aria-hidden="true">↗</span><p id="empty-contacts-title">Загружаем чаты WhatsApp</p><span id="empty-contacts-description">Обновите список, чтобы увидеть привычные чаты из вашего WhatsApp.</span><button id="refresh-empty-chats" class="text-button" type="button">Обновить чаты</button><button id="add-first-contact" class="text-button manual-fallback" type="button">Добавить собеседника вручную</button></div>
+          <button id="open-connection" class="button secondary sidebar-connect" type="button" hidden>Подключить WhatsApp ↗</button>
+          <div class="sidebar-note"><span class="note-symbol" aria-hidden="true">↔</span><p>Вы пишете по-русски.<br>Собеседник читает на своём языке.<br>Его ответы видите в переводе.</p></div>
+        </aside>
+
+        <main id="conversation" class="conversation" aria-label="Переписка">
+          <header class="conversation-header">
+            <button id="back-to-chats" class="icon-button back-button" type="button" aria-label="Вернуться к списку чатов">←</button>
+            <span id="contact-avatar" class="avatar header-avatar" aria-hidden="true">↔</span>
+            <div class="conversation-heading"><h1 id="contact-name">Место для разговора</h1><p id="contact-phone">Выберите собеседника слева</p></div>
+            <label id="contact-language-control" class="chat-language" hidden><span>Язык собеседника</span><select id="contact-language" aria-label="Язык собеседника"></select></label>
+          </header>
+
+          <div id="network-banner" class="notice network-notice" role="status" hidden>Связь с переводчиком прервалась. Пробуем подключиться…</div>
+          <div id="conversation-scroll" class="conversation-scroll">
+            <section id="setup-panel" class="setup-panel" aria-labelledby="setup-title" hidden>
+              <div class="setup-copy"><p class="eyebrow">ОДИН РАЗ — И ВЫ НА СВЯЗИ</p><h2 id="setup-title">Ваш WhatsApp.<br>На двух языках.</h2><p id="setup-description">Подключите свой аккаунт. Номер и привычные чаты остаются с вами.</p><button id="connect-button" class="button primary" type="button">Подключить WhatsApp <span aria-hidden="true">↗</span></button><p id="setup-error" class="form-error" role="alert" hidden></p></div>
+              <div id="qr-placeholder" class="setup-illustration" aria-hidden="true"><span class="illustration-bubble bubble-russian">Привет!<span>ВАШ ТЕКСТ</span></span><span class="illustration-arrow">↘</span><span class="illustration-bubble bubble-serbian">Hello!<span>ПЕРЕВОД</span></span></div>
+              <div id="qr-panel" class="qr-panel" hidden><img id="qr-image" alt="QR-код для подключения WhatsApp" width="208" height="208"><p>В WhatsApp на телефоне:<br><strong>Настройки → Связанные устройства → Привязка устройства.</strong><br>Наведите камеру на этот код.</p></div>
+            </section>
+
+            <div id="translator-notice" class="notice translator-notice" role="status" hidden><span aria-hidden="true">◌</span><div><strong>Перевод пока недоступен</strong><p id="translator-reason">Подключаем переводчик. Здесь появится его состояние.</p></div></div>
+            <div id="demo-notice" class="notice demo-notice" hidden>Это демонстрация интерфейса. Сообщения не отправляются в WhatsApp.</div>
+
+            <section id="empty-conversation" class="empty-conversation" aria-labelledby="empty-title"><div class="empty-conversation-icon" aria-hidden="true">а<span>а</span></div><p class="eyebrow">СЛОВА СТАНОВЯТСЯ БЛИЖЕ</p><h2 id="empty-title">Просто начните разговор.</h2><p id="empty-description">Выберите чат или добавьте собеседника.<br>Перевод появится рядом с каждым сообщением.</p><button id="add-from-conversation" class="text-button" type="button">Добавить собеседника ↗</button></section>
+            <div id="message-list" class="message-list" role="log" aria-label="История сообщений" aria-live="polite" aria-relevant="additions text"></div>
+          </div>
+
+          <div id="pending-notice" class="notice pending-notice" role="status" hidden><div><strong>Проверяем результат отправки</strong><p id="pending-description">Ответ не получен. Повторно сообщение не отправляем.</p></div><button id="check-result" class="button secondary" type="button">Проверить результат</button></div>
+          <form id="compose-form" class="compose-form">
+            <div class="compose-topline"><label for="message-text">Ваше сообщение <span>на русском</span></label><span id="recipient-label">Сначала выберите чат</span></div>
+            <div class="compose-box"><textarea id="message-text" name="text" rows="2" maxlength="4000" placeholder="Напишите по-русски…" aria-describedby="compose-help" disabled></textarea><button id="send-button" class="button primary send-button" type="submit" disabled><span>Перевести и отправить</span><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="m5 12 14-7-5 14-3-5-6-2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m11 14 8-9" stroke="currentColor" stroke-width="1.6"/></svg></button></div>
+            <div class="voice-toolbar"><button id="start-dictation" class="text-button dictation-button" type="button" aria-describedby="voice-help" disabled><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none"><rect x="9" y="3" width="6" height="12" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="M6 11v1a6 6 0 0 0 12 0v-1M12 18v3m-3 0h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>Надиктовать</button><span id="voice-help">Диктовка добавит текст в черновик. Перед отправкой проверьте его.</span></div>
+            <div id="voice-status" class="voice-status" hidden><span id="voice-state-label" role="status"></span><span id="voice-timer" aria-live="off"></span><button id="stop-dictation" class="button secondary" type="button">Завершить запись</button><button id="cancel-dictation" class="text-button" type="button">Отменить</button><p>Остаёмся в этом чате до завершения. Текст можно редактировать.</p></div>
+            <p id="voice-error" class="form-error" role="alert" hidden></p>
+            <p id="compose-help" class="compose-help">Сообщение получит только выбранный собеседник.</p>
+          </form>
+        </main>
+      </div>
+      <footer class="app-footer"><span>Личный чат с переводом</span><span>Ответы собеседника переводятся только для вас</span></footer>
+    </div>
+
+    <dialog id="contact-dialog" class="contact-dialog" aria-labelledby="dialog-title">
+      <form id="contact-form"><div class="dialog-heading"><h2 id="dialog-title">Новый собеседник</h2><button id="close-contact-dialog" class="icon-button" type="button" aria-label="Закрыть">×</button></div><p class="muted">Укажите номер, с которым человек использует WhatsApp.</p><label for="new-contact-name">Имя</label><input id="new-contact-name" name="name" autocomplete="off" placeholder="Например, Марко" maxlength="80" required><label for="new-contact-phone">Номер телефона</label><input id="new-contact-phone" name="phone" type="tel" inputmode="tel" autocomplete="off" placeholder="+381 64 123 4567" maxlength="24" aria-describedby="phone-help" required><p id="phone-help" class="input-help">С кодом страны, начиная с +.</p><label for="new-contact-language">Язык собеседника</label><select id="new-contact-language" required></select><p class="input-help">Вы пишете по-русски, перевод отправляется на этом языке.</p><p id="contact-error" class="form-error" role="alert" hidden></p><button id="save-contact" class="button primary" type="submit">Добавить и открыть чат <span aria-hidden="true">↗</span></button></form>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

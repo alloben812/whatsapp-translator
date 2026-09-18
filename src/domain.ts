@@ -1,22 +1,49 @@
+import type { ContactLanguageCode, LanguageCode, TranslationLanguages } from './languages.js';
+
+/** Compatibility direction for existing adapters; explicit languages take precedence. */
 export type TranslationDirection = 'ru-sr' | 'sr-ru';
 
 export interface Translator {
-  translate(text: string, direction: TranslationDirection): Promise<string>;
+  translate(text: string, direction: TranslationDirection, languages?: TranslationLanguages): Promise<string>;
 }
 
 export interface Transport {
-  send(contactId: string, text: string): Promise<{ messageId: string }>;
+  send(contactId: string, text: string, messageId?: string): Promise<{ messageId: string }>;
 }
 
 export interface Contact {
   id: string;
   name: string;
+  language?: ContactLanguageCode;
+}
+
+/** Metadata discovered from WhatsApp. Discovery never enables translation. */
+export interface DiscoveredChat {
+  id: string;
+  name?: string;
+  lastMessageAt?: string;
+  preview?: string;
+  /** Omitted metadata must not clear an earlier WhatsApp update. */
+  pinnedAt?: string | null;
+  archived?: boolean;
+  hasConversation?: boolean;
+}
+
+export interface ChatListEntry extends Contact {
+  translationEnabled: boolean;
+  lastMessageAt: string | null;
+  preview: string | null;
+  pinnedAt: string | null;
+  archived: boolean | null;
+  hasConversation: boolean;
 }
 
 export type MessageStatus =
   | 'translating'
   | 'sending'
   | 'sent'
+  | 'delivered'
+  | 'read'
   | 'received'
   | 'failed'
   | 'unknown';
@@ -32,6 +59,8 @@ export interface Message {
   idempotencyKey: string | null;
   createdAt: string;
   errorCode: string | null;
+  sourceLanguage: LanguageCode;
+  targetLanguage: LanguageCode;
 }
 
 export interface SendRequest {
