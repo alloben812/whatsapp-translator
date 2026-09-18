@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import type { BaileysEventMap, WAMessage } from '@whiskeysockets/baileys';
-import type { IncomingMessage } from '../src/domain.js';
-import { incomingPlainText, resolveMessageContact, WhatsAppConnection, type WhatsAppSession } from '../src/whatsapp.js';
+import type { DiscoveredChat, IncomingMessage } from '../src/domain.js';
+import { incomingPlainText, resolveMessageContact, shouldSyncDirectoryHistoryMessage, WhatsAppConnection, type WhatsAppSession } from '../src/whatsapp.js';
 
 const CONTACT = '381641112222@s.whatsapp.net';
 const OTHER = '381642223333@s.whatsapp.net';
 const MESSAGE_ID = '3EB0TESTMESSAGE001';
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+type Receipt = { contactId: string; messageId: string; status: string };
 
 class FakeSession implements WhatsAppSession {
   events = new EventEmitter();
@@ -18,11 +19,14 @@ class FakeSession implements WhatsAppSession {
   lookupResult: { jid: string; exists: boolean }[] | undefined = [{ jid: CONTACT, exists: true }];
   returnedId: string | null = MESSAGE_ID;
   saveCount = 0;
+  syncCount = 0;
   stopCount = 0;
   failSend = false;
   failSave = false;
+  failSync = false;
+  syncHook: (() => void | Promise<void>) | undefined;
 
-  on<K extends 'connection.update' | 'creds.update' | 'messages.upsert' | 'messages.update'>(event: K, listener: (value: BaileysEventMap[K]) => void): () => void {
+  on<K extends Parameters<WhatsAppSession['on']>[0]>(event: K, listener: (value: BaileysEventMap[K]) => void): () => void {
     this.events.on(event, listener);
     return () => { this.events.off(event, listener); };
   }
@@ -38,6 +42,11 @@ class FakeSession implements WhatsAppSession {
     if (this.failSend) throw new Error('private provider payload');
     return this.returnedId;
   }
+  async syncContacts(): Promise<void> {
+    this.syncCount += 1;
+    if (this.failSync) throw new Error('private sync payload');
+    await this.syncHook?.();
+  }
   async saveCredentials(): Promise<void> {
     this.saveCount += 1;
     if (this.failSave) throw new Error('private auth payload');
@@ -50,18 +59,19 @@ class FakeSession implements WhatsAppSession {
   }
 }
 
-function harness(onIncoming?: (event: IncomingMessage) => Promise<unknown>) {
+function harness(onIncoming?: (event: IncomingMessage) => Promise<unknown>, onChats?: (chats: DiscoveredChat[]) => void) {
   const sessions: FakeSession[] = [];
   const incoming: IncomingMessage[] = [];
-  const receipts: { contactId: string; messageId: string; status: string }[] = [];
+  const receipts: Receipt[] = [];
   const timers: { callback: () => void; delayMs: number; cancelled: boolean }[] = [];
   let stateChanges = 0;
-  const connection = new WhatsAppConnection({
+  const options = {
     authDirectory: '/unused-offline-test',
     onIncoming: onIncoming ?? (async message => { incoming.push(message); }),
-    onReceipt: event => { receipts.push(event); },
+    onReceipt: (event: Receipt) => { receipts.push(event); },
     onState: () => { stateChanges += 1; },
-  }, {
+  };
+  const connection = new WhatsAppConnection(onChats ? { ...options, onChats } : options, {
     createSession: async () => {
       const session = new FakeSession();
       sessions.push(session);
@@ -79,6 +89,8 @@ function harness(onIncoming?: (event: IncomingMessage) => Promise<unknown>) {
 function textMessage(remoteJid = CONTACT, id = 'incoming-1', text = 'Dobar dan'): WAMessage {
   return { key: { remoteJid, id, fromMe: false }, message: { conversation: text } };
 }
+
+const byId = (items: DiscoveredChat[], id: string): DiscoveredChat => items.filter(item => item.id === id).at(-1)!;
 
 test('connection is explicit, exposes QR in memory, snapshots state and closes without logout or sends', async () => {
   const h = harness();
@@ -128,6 +140,74 @@ test('only notify plain personal texts reach the application, with exact origina
   ]);
   assert.equal(socket.sent.length, 0);
   await h.connection.close();
+});
+
+test('directory metadata is emitted from contacts, chats, history and own messages without translating history', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  socket.mapping.set('999@lid', CONTACT);
+  socket.mapping.set('777@lid', OTHER);
+  socket.emit('contacts.upsert', [
+    { id: CONTACT, name: 'Марко' },
+    { id: '123@g.us', name: 'Группа' },
+    { id: '888@lid', name: 'LID без номера' },
+    { id: '777@lid', name: 'Ана' },
+  ]);
+  socket.emit('chats.upsert', [
+    { id: '999@lid', name: 'Чат Марко', lastMessageRecvTimestamp: 1_700_000_000 },
+    { id: '123@g.us', name: 'Группа', lastMessageRecvTimestamp: 1_700_000_001 },
+  ]);
+  const own = textMessage(CONTACT, 'own-message', 'Вчерашний ответ');
+  own.key.fromMe = true;
+  own.pushName = 'Имя владельца';
+  own.messageTimestamp = 1_700_000_002;
+  const lidHistory = textMessage('999@lid', 'lid-history', 'Ćao');
+  lidHistory.messageTimestamp = 1_700_000_003;
+  socket.emit('messaging-history.set', {
+    chats: [{ id: CONTACT, messages: [{ message: textMessage(CONTACT, 'nested-history', 'Zdravo') }] }],
+    contacts: [{ id: CONTACT, notify: 'Marko' }],
+    messages: [lidHistory, textMessage('123@g.us', 'group-history', 'skip group')],
+    isLatest: true,
+  });
+  socket.emit('messages.upsert', { type: 'append', requestId: 'history-request', messages: [own] });
+  await flush();
+  await flush();
+  await h.connection.close();
+  assert.equal(h.incoming.length, 0);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(byId(directory, CONTACT).preview, 'Вчерашний ответ');
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:13:22.000Z');
+  assert.equal(directory.some(item => item.id === CONTACT && item.name === 'Имя владельца'), false);
+  assert.equal(byId(directory, OTHER).name, 'Ана');
+  assert.equal(directory.some(item => item.id === '888@lid'), false);
+  assert.equal(directory.some(item => item.id === '123@g.us'), false);
+});
+
+test('directory merge keeps newest preview regardless of history event order', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  socket.mapping.set('999@lid', CONTACT);
+  const newer = textMessage(CONTACT, 'newer', 'Новый preview');
+  newer.messageTimestamp = 1_700_000_100;
+  const older = textMessage(CONTACT, 'older', 'Старый preview');
+  older.messageTimestamp = 1_600_000_000;
+  socket.emit('messaging-history.set', {
+    contacts: [],
+    chats: [{ id: '999@lid', lastMessageRecvTimestamp: 1_600_000_000, messages: [{ message: older }] }],
+    messages: [newer],
+    isLatest: true,
+  });
+  await flush();
+  await flush();
+  await h.connection.close();
+  assert.equal(byId(directory, CONTACT).preview, 'Новый preview');
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:15:00.000Z');
 });
 
 test('LID handling accepts authoritative mappings, strips devices, drops ambiguity and never guesses a phone', async () => {
@@ -217,6 +297,35 @@ test('contact lookup requires an international phone and returns only a verified
   socket.lookupResult = [{ jid: CONTACT, exists: true }, { jid: OTHER, exists: true }];
   await assert.rejects(h.connection.resolveContact('+381641112222'), { code: 'WHATSAPP_CONTACT_LOOKUP_FAILED' });
   await h.connection.close();
+});
+
+test('explicit contact sync is connected-only, delegates metadata resync and never sends', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await assert.rejects(h.connection.syncContacts(), { code: 'WHATSAPP_NOT_CONNECTED' });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  socket.mapping.set('777@lid', OTHER);
+  socket.syncHook = () => {
+    socket.emit('contacts.upsert', [{ id: '777@lid', name: 'Синхронизированная Ана' }]);
+  };
+  await h.connection.syncContacts();
+  assert.equal(socket.syncCount, 1);
+  assert.equal(socket.sent.length, 0);
+  assert.equal(byId(directory, OTHER).name, 'Синхронизированная Ана');
+  socket.failSync = true;
+  await assert.rejects(h.connection.syncContacts(), { code: 'WHATSAPP_CONTACT_SYNC_FAILED' });
+  await h.connection.close();
+});
+
+test('history sync gate allows directory bootstrap types only', () => {
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: 0 }), true);
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: 3 }), true);
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: 4 }), true);
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: 2 }), false);
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: 6 }), false);
+  assert.equal(shouldSyncDirectoryHistoryMessage({ syncType: null }), false);
 });
 
 test('reconnection budget is bounded even when connections briefly open, and explicit connect resets it', async () => {

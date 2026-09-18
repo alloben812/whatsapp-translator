@@ -5,7 +5,7 @@ import { Store } from './store.js';
 import { TranslationService } from './service.js';
 import { WhatsAppConnection } from './whatsapp.js';
 import { CommandTranslator, createTranslator } from './translator.js';
-import { createApplication, type TranslatorStatus } from './http-app.js';
+import { createApplication, type TranslatorStatus, type ChatSyncStatus } from './http-app.js';
 import { CommandTranscriber, createTranscriber } from './transcription.js';
 
 process.umask(0o077);
@@ -61,10 +61,31 @@ async function main(): Promise<void> {
     finally { checking = false; }
   };
   const store = new Store(join(dataDirectory, 'messages.sqlite'));
+  let chatSync: ChatSyncStatus = { status: 'idle', errorCode: null, lastSyncedAt: null };
+  let syncingChats: Promise<void> | null = null;
+  let initialSyncStarted = false;
+  const syncChats = (): Promise<void> => {
+    if (syncingChats) return syncingChats;
+    chatSync = { ...chatSync, status: 'syncing', errorCode: null };
+    const work = connection.syncContacts().then(() => {
+      chatSync = { status: 'ready', errorCode: null, lastSyncedAt: new Date().toISOString() };
+    }).catch(() => {
+      chatSync = { ...chatSync, status: 'error', errorCode: 'WHATSAPP_CHAT_SYNC_FAILED' };
+    }).finally(() => { syncingChats = null; });
+    syncingChats = work;
+    return work;
+  };
   let service!: TranslationService;
   const incoming = new Set<Promise<unknown>>();
   const connection = new WhatsAppConnection({
     authDirectory: join(dataDirectory, 'whatsapp-auth'),
+    onChats: chats => { store.saveDiscoveredChats(chats); },
+    onState: () => {
+      if (connection.state().phase === 'connected' && !initialSyncStarted) {
+        initialSyncStarted = true;
+        void syncChats();
+      }
+    },
     onIncoming: event => {
       const work = service.receive(event);
       incoming.add(work);
@@ -77,6 +98,7 @@ async function main(): Promise<void> {
   const server = createApplication({
     store, service, connection, translatorStatus: () => readiness, webDirectory: join(root, 'web'), origin,
     transcriber: speech.transcriber, speechReady: () => speechReady,
+    chatSyncStatus: () => chatSync, syncChats,
     ...(process.env.WA_PASSWORD ? { password: process.env.WA_PASSWORD } : {}),
   });
   await new Promise<void>((accept, reject) => {

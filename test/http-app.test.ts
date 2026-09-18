@@ -12,19 +12,20 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   const web = mkdtempSync(join(tmpdir(), 'wa-http-test-'));
   for (const file of ['index.html', 'app.js', 'styles.css']) writeFileSync(join(web, file), file);
   const store = new Store(':memory:');
-  let sends = 0; let ready = true; let transcriptions = 0;
+  let sends = 0; let ready = true; let transcriptions = 0; let translations = 0; let syncRequests = 0;
   let phase: ConnectionState['phase'] = 'disconnected';
   const connection = {
     state: () => ({ phase, qr: null, account: null, errorCode: null }),
     async connect() { phase = 'connected'; },
     async resolveContact(phone: string) { return { id: `${phone}@s.whatsapp.net` }; },
   };
-  const service = new TranslationService(store, { async translate() { return 'Zdravo!'; } }, {
+  const service = new TranslationService(store, { async translate() { translations++; return 'Zdravo!'; } }, {
     async send(_contact, _text, messageId) { sends++; return { messageId: messageId! }; },
   }, []);
   const app = createApplication({ store, service, connection, webDirectory: web, origin: 'http://127.0.0.1:8787',
     password: 'private-owner-password', translatorStatus: () => ({ ready, label: 'Test fixture', reason: ready ? null : 'unavailable' }),
     speechReady: () => true,
+    syncChats: async () => { syncRequests++; },
     transcriber: { async transcribe(bytes, language) {
       transcriptions++; assert.equal(language, 'ru'); assert.equal(bytes.toString(), 'audio fixture'); return 'Текст диктовки';
     } },
@@ -74,6 +75,24 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   assert.equal((await call('/api/state', undefined, { Host: 'evil.example' })).status, 403);
   assert.equal((await call('/api/connect', {}, { 'X-CSRF-Token': 'wrong' })).status, 403);
   assert.equal((await call('/api/connect', {})).status, 202);
+  const discovered = { id: '381600000003@s.whatsapp.net', name: 'Ана из WhatsApp', preview: 'Тестовый чат', lastMessageAt: '2026-09-18T12:00:00.000Z' };
+  store.saveDiscoveredChats([discovered]);
+  const directory = await (await call('/api/state')).json();
+  assert.equal(directory.chats[0].name, discovered.name);
+  assert.equal(directory.chats[0].translationEnabled, false);
+  assert.equal(directory.contacts.length, 0);
+  assert.equal(await service.receive({ id: 'not-enabled', contactId: discovered.id, text: 'Hello' }), null);
+  assert.equal((await call('/api/chats/open', { contactId: discovered.id }, { 'X-CSRF-Token': 'wrong' })).status, 403);
+  assert.equal((await call('/api/chats/open', { contactId: '381600000099@s.whatsapp.net' })).status, 400);
+  const opened = await (await call('/api/chats/open', { contactId: discovered.id })).json();
+  assert.equal(opened.name, discovered.name);
+  assert.equal(opened.language, 'sr-Latn');
+  assert.equal((await call('/api/chats/sync', {}, { 'X-CSRF-Token': 'wrong' })).status, 403);
+  assert.equal((await call('/api/chats/sync', {})).status, 202);
+  assert.equal(syncRequests, 1);
+  assert.equal(translations, 0);
+  assert.equal(sends, 0);
+  assert.equal(store.list().length, 0);
   assert.equal((await call('/api/contacts', { name: 'Марко', phone: '381600000001', extra: 'no' })).status, 400);
   const contactResponse = await call('/api/contacts', { name: 'Марко', phone: '+381600000001' });
   assert.equal(contactResponse.status, 201);

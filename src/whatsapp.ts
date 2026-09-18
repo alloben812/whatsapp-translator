@@ -1,6 +1,7 @@
 import { chmod, lstat, mkdir } from 'node:fs/promises';
-import type { BaileysEventMap, WAMessageKey, WAMessage } from '@whiskeysockets/baileys';
-import { isIndividualContactId, ServiceError, type IncomingMessage, type Transport } from './domain.js';
+import { EventEmitter } from 'node:events';
+import type { BaileysEventMap, Chat, Contact as BaileysContact, WAMessageKey, WAMessage } from '@whiskeysockets/baileys';
+import { isIndividualContactId, ServiceError, type DiscoveredChat, type IncomingMessage, type Transport } from './domain.js';
 
 export type WhatsAppState = {
   phase: 'disconnected' | 'connecting' | 'qr' | 'connected' | 'logged_out' | 'error';
@@ -10,7 +11,16 @@ export type WhatsAppState = {
 };
 
 type Receipt = { contactId: string; messageId: string; status: 'sent' | 'delivered' | 'read' };
-type EventName = 'connection.update' | 'creds.update' | 'messages.upsert' | 'messages.update';
+type EventName =
+  | 'connection.update'
+  | 'creds.update'
+  | 'messages.upsert'
+  | 'messages.update'
+  | 'messaging-history.set'
+  | 'chats.upsert'
+  | 'chats.update'
+  | 'contacts.upsert'
+  | 'contacts.update';
 
 /** Small injectable boundary; tests never load Baileys or open a connection. */
 export interface WhatsAppSession {
@@ -19,6 +29,7 @@ export interface WhatsAppSession {
   phoneForLid(lid: string): Promise<string | null>;
   lookup(phone: string): Promise<{ jid: string; exists: boolean }[] | undefined>;
   sendText(contactId: string, text: string, messageId?: string): Promise<string | null>;
+  syncContacts?(): Promise<void>;
   saveCredentials(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -27,6 +38,7 @@ interface ConnectionOptions {
   authDirectory: string;
   onIncoming: (event: IncomingMessage) => Promise<unknown>;
   onReceipt: (event: Receipt) => void;
+  onChats?: (chats: DiscoveredChat[]) => void;
   onState?: () => void;
 }
 
@@ -36,6 +48,20 @@ export interface WhatsAppDependencies {
 }
 
 const MAX_RECONNECTS = 5;
+const CONTACT_SYNC_TIMEOUT_MS = 35_000;
+const APP_STATE_COLLECTIONS = ['critical_block', 'critical_unblock_low', 'regular_high', 'regular_low', 'regular'] as const;
+const DIRECTORY_HISTORY_SYNC_TYPES = new Set([0, 3, 4]);
+const SESSION_EVENT_NAMES: EventName[] = [
+  'connection.update',
+  'creds.update',
+  'messages.upsert',
+  'messages.update',
+  'messaging-history.set',
+  'chats.upsert',
+  'chats.update',
+  'contacts.upsert',
+  'contacts.update',
+];
 const silentLogger = {
   level: 'silent',
   child: (_bindings: Record<string, unknown>) => silentLogger,
@@ -45,6 +71,48 @@ const silentLogger = {
   warn: (_data: unknown, _message?: string) => {},
   error: (_data: unknown, _message?: string) => {},
 };
+
+export function shouldSyncDirectoryHistoryMessage(message: { syncType?: number | null }): boolean {
+  return typeof message.syncType === 'number' && DIRECTORY_HISTORY_SYNC_TYPES.has(message.syncType);
+}
+
+function withTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('WHATSAPP_CONTACT_SYNC_TIMEOUT')), timeoutMs);
+    timer.unref();
+  });
+  return Promise.race([work, timeout]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+function waitForAppStateKey(
+  socket: {
+    authState: { creds: { myAppStateKeyId?: string | null } };
+    ev: {
+      on(event: 'creds.update', listener: (value: { myAppStateKeyId?: string | null }) => void): void;
+      off(event: 'creds.update', listener: (value: { myAppStateKeyId?: string | null }) => void): void;
+    };
+  },
+  timeoutMs: number,
+): Promise<void> {
+  if (socket.authState.creds.myAppStateKeyId) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.ev.off('creds.update', onCredentials);
+      reject(new Error('WHATSAPP_APP_STATE_KEY_UNAVAILABLE'));
+    }, timeoutMs);
+    timer.unref();
+    const finish = () => {
+      clearTimeout(timer);
+      socket.ev.off('creds.update', onCredentials);
+      resolve();
+    };
+    const onCredentials = (value: { myAppStateKeyId?: string | null }) => {
+      if (value.myAppStateKeyId || socket.authState.creds.myAppStateKeyId) finish();
+    };
+    socket.ev.on('creds.update', onCredentials);
+  });
+}
 
 async function createBaileysSession(authDirectory: string): Promise<WhatsAppSession> {
   await mkdir(authDirectory, { recursive: true, mode: 0o700 });
@@ -59,7 +127,7 @@ async function createBaileysSession(authDirectory: string): Promise<WhatsAppSess
     browser: ['WhatsApp Translator', 'Chrome', '1.0.0'],
     markOnlineOnConnect: false,
     syncFullHistory: false,
-    shouldSyncHistoryMessage: () => false,
+    shouldSyncHistoryMessage: shouldSyncDirectoryHistoryMessage,
     shouldIgnoreJid: jid => !/^(?:\d+(?::\d+)?@(?:s\.whatsapp\.net|lid))$/.test(jid),
     emitOwnEvents: false,
     generateHighQualityLinkPreview: false,
@@ -70,10 +138,32 @@ async function createBaileysSession(authDirectory: string): Promise<WhatsAppSess
     connectTimeoutMs: 30_000,
     defaultQueryTimeoutMs: 30_000,
   });
+  const events = new EventEmitter();
+  const pending = new Map<EventName, unknown[]>();
+  const listenerCounts = new Map<EventName, number>();
+  for (const eventName of SESSION_EVENT_NAMES) {
+    socket.ev.on(eventName, value => {
+      if ((listenerCounts.get(eventName) ?? 0) === 0) {
+        const queue = pending.get(eventName) ?? [];
+        queue.push(value);
+        if (queue.length > 50) queue.shift();
+        pending.set(eventName, queue);
+      } else {
+        events.emit(eventName, value);
+      }
+    });
+  }
   return {
     on(event, listener) {
-      socket.ev.on(event, listener);
-      return () => { socket.ev.off(event, listener); };
+      const wrapped = listener as (value: unknown) => void;
+      listenerCounts.set(event, (listenerCounts.get(event) ?? 0) + 1);
+      events.on(event, wrapped);
+      for (const value of pending.get(event) ?? []) wrapped(value);
+      pending.delete(event);
+      return () => {
+        events.off(event, wrapped);
+        listenerCounts.set(event, Math.max(0, (listenerCounts.get(event) ?? 1) - 1));
+      };
     },
     account: () => canonicalPhoneJid(socket.user?.id) ?? null,
     phoneForLid: lid => socket.signalRepository.lidMapping.getPNForLID(lid),
@@ -81,6 +171,12 @@ async function createBaileysSession(authDirectory: string): Promise<WhatsAppSess
     async sendText(contactId, text, messageId) {
       const result = await socket.sendMessage(contactId, { text, linkPreview: null }, messageId ? { messageId } : {});
       return result?.key.id ?? null;
+    },
+    syncContacts: async () => {
+      const startedAt = Date.now();
+      await waitForAppStateKey(socket, CONTACT_SYNC_TIMEOUT_MS);
+      const remainingMs = Math.max(1, CONTACT_SYNC_TIMEOUT_MS - (Date.now() - startedAt));
+      await withTimeout(socket.resyncAppState(APP_STATE_COLLECTIONS, true), remainingMs);
     },
     saveCredentials: saveCreds,
     stop: () => socket.end(undefined),
@@ -91,6 +187,126 @@ function canonicalPhoneJid(jid: unknown): string | null {
   if (typeof jid !== 'string') return null;
   const match = /^(\d+)(?::\d+)?@s\.whatsapp\.net$/.exec(jid);
   return match ? `${match[1]}@s.whatsapp.net` : null;
+}
+
+function canonicalLidJid(jid: unknown): string | null {
+  if (typeof jid !== 'string') return null;
+  const match = /^(\d+)(?::\d+)?@lid$/.exec(jid);
+  return match ? `${match[1]}@lid` : null;
+}
+
+async function phoneForDirectJid(
+  jid: unknown,
+  protocolPhone: unknown,
+  phoneForLid: (lid: string) => Promise<string | null>,
+): Promise<string | null> {
+  const phone = canonicalPhoneJid(jid);
+  if (phone) return phone;
+  const lid = canonicalLidJid(jid);
+  if (!lid) return jid == null ? canonicalPhoneJid(protocolPhone) : null;
+  const mapped = canonicalPhoneJid(await phoneForLid(lid));
+  const alternate = canonicalPhoneJid(protocolPhone);
+  if (mapped && alternate && mapped !== alternate) return null;
+  return mapped ?? alternate;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'object' && value !== null && 'toNumber' in value && typeof (value as { toNumber?: unknown }).toNumber === 'function') {
+    const converted = (value as { toNumber: () => unknown }).toNumber();
+    return typeof converted === 'number' && Number.isFinite(converted) ? converted : null;
+  }
+  return null;
+}
+
+function isoTimestamp(value: unknown): string | undefined {
+  const timestamp = numberValue(value);
+  if (timestamp === null || timestamp <= 0) return undefined;
+  const millis = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  return new Date(millis).toISOString();
+}
+
+function messagePreview(message: WAMessage): string | undefined {
+  const content = message.message;
+  if (!content) return undefined;
+  return nonEmptyString(content.conversation)
+    ?? nonEmptyString(content.extendedTextMessage?.text)
+    ?? nonEmptyString(content.imageMessage?.caption)
+    ?? nonEmptyString(content.videoMessage?.caption)
+    ?? nonEmptyString(content.documentMessage?.caption);
+}
+
+function discoveredChat(fields: { id: string; name?: string | undefined; lastMessageAt?: string | undefined; preview?: string | undefined }): DiscoveredChat {
+  const chat: DiscoveredChat = { id: fields.id };
+  if (fields.name !== undefined) chat.name = fields.name;
+  if (fields.lastMessageAt !== undefined) chat.lastMessageAt = fields.lastMessageAt;
+  if (fields.preview !== undefined) chat.preview = fields.preview;
+  return chat;
+}
+
+async function discoveredFromContact(
+  contact: Partial<BaileysContact>,
+  phoneForLid: (lid: string) => Promise<string | null>,
+): Promise<DiscoveredChat | null> {
+  const id = await phoneForDirectJid(contact.id, contact.phoneNumber, phoneForLid);
+  if (!id) return null;
+  return discoveredChat({ id, name: nonEmptyString(contact.name) ?? nonEmptyString(contact.notify) ?? nonEmptyString(contact.verifiedName) });
+}
+
+async function discoveredFromChat(
+  chat: Partial<Chat>,
+  phoneForLid: (lid: string) => Promise<string | null>,
+): Promise<DiscoveredChat | null> {
+  const id = await phoneForDirectJid(chat.id, chat.pnJid, phoneForLid);
+  if (!id) return null;
+  const latest = chat.messages?.map(item => item.message).filter((item): item is WAMessage => !!item)[0];
+  return discoveredChat({
+    id,
+    name: nonEmptyString(chat.name) ?? nonEmptyString(chat.displayName) ?? nonEmptyString(chat.username),
+    lastMessageAt: isoTimestamp(chat.lastMessageRecvTimestamp ?? chat.lastMsgTimestamp ?? chat.conversationTimestamp),
+    preview: latest ? messagePreview(latest) : undefined,
+  });
+}
+
+async function discoveredFromMessage(message: WAMessage, phoneForLid: (lid: string) => Promise<string | null>): Promise<DiscoveredChat | null> {
+  const contactId = await resolveMessageContact(message.key, phoneForLid);
+  if (!contactId) return null;
+  return discoveredChat({
+    id: contactId,
+    name: message.key.fromMe ? undefined : nonEmptyString(message.pushName) ?? nonEmptyString(message.verifiedBizName),
+    lastMessageAt: isoTimestamp(message.messageTimestamp),
+    preview: messagePreview(message),
+  });
+}
+
+function timestampMs(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mergeDiscoveredChats(chats: (DiscoveredChat | null)[]): DiscoveredChat[] {
+  const merged = new Map<string, DiscoveredChat>();
+  for (const chat of chats) {
+    if (!chat) continue;
+    const existing = merged.get(chat.id);
+    const existingAt = timestampMs(existing?.lastMessageAt);
+    const chatAt = timestampMs(chat.lastMessageAt);
+    const useMessageMetadata = chatAt !== null
+      ? existingAt === null || chatAt >= existingAt
+      : existingAt === null && existing?.preview === undefined;
+    merged.set(chat.id, discoveredChat({
+      id: chat.id,
+      name: chat.name ?? existing?.name,
+      lastMessageAt: useMessageMetadata ? chat.lastMessageAt ?? existing?.lastMessageAt : existing?.lastMessageAt,
+      preview: useMessageMetadata ? chat.preview ?? existing?.preview : existing?.preview,
+    }));
+  }
+  return [...merged.values()];
 }
 
 /** Only protocol-provided phone numbers or the library's persisted LID map count. */
@@ -138,6 +354,8 @@ export class WhatsAppConnection implements Transport {
   private credentialsWork: Promise<void> = Promise.resolve();
   private incomingWork: Promise<void> = Promise.resolve();
   private receiptsWork: Promise<void> = Promise.resolve();
+  private chatsWork: Promise<void> = Promise.resolve();
+  private syncContactsWork: Promise<void> = Promise.resolve();
   private readonly createSession: (authDirectory: string) => Promise<WhatsAppSession>;
   private readonly schedule: (callback: () => void, delayMs: number) => () => void;
 
@@ -169,7 +387,7 @@ export class WhatsAppConnection implements Transport {
     const session = this.detachSession();
     this.update({ phase: 'disconnected', qr: null, account: null, errorCode: null });
     await Promise.all([session?.stop().catch(() => {}), this.opening]);
-    await Promise.all([this.credentialsWork, this.incomingWork, this.receiptsWork]);
+    await Promise.all([this.credentialsWork, this.incomingWork, this.receiptsWork, this.chatsWork, this.syncContactsWork]);
   }
 
   async resolveContact(phone: string): Promise<{ id: string; name?: string } | null> {
@@ -207,6 +425,23 @@ export class WhatsAppConnection implements Transport {
     }
   }
 
+  async syncContacts(): Promise<void> {
+    const session = this.connectedSession();
+    if (!session.syncContacts) throw new ServiceError('WHATSAPP_CONTACT_SYNC_UNAVAILABLE', 'WhatsApp contact sync is unavailable.');
+    const work = this.syncContactsWork.then(async () => {
+      if (this.session !== session || this.current.phase !== 'connected') throw new Error('DISCONNECTED');
+      await session.syncContacts!();
+      await this.chatsWork;
+      if (this.session !== session || this.current.phase !== 'connected') throw new Error('DISCONNECTED');
+    });
+    this.syncContactsWork = work.catch(() => {});
+    try {
+      await work;
+    } catch {
+      throw new ServiceError('WHATSAPP_CONTACT_SYNC_FAILED', 'Could not sync WhatsApp contacts.');
+    }
+  }
+
   private connectedSession(): WhatsAppSession {
     if (!this.session || this.current.phase !== 'connected') throw new ServiceError('WHATSAPP_NOT_CONNECTED', 'Connect WhatsApp first.');
     return this.session;
@@ -215,6 +450,12 @@ export class WhatsAppConnection implements Transport {
   private update(patch: Partial<WhatsAppState>): void {
     this.current = { ...this.current, ...patch };
     try { this.options.onState?.(); } catch { /* UI notification must not break the connection. */ }
+  }
+
+  private emitChats(chats: (DiscoveredChat | null)[]): void {
+    const discovered = mergeDiscoveredChats(chats);
+    if (!discovered.length) return;
+    try { this.options.onChats?.(discovered); } catch { this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' }); }
   }
 
   private detachSession(): WhatsAppSession | null {
@@ -258,6 +499,16 @@ export class WhatsAppConnection implements Transport {
             });
           }),
           session.on('messages.upsert', event => {
+            if (!active()) return;
+            for (const message of event.messages) {
+              this.chatsWork = this.chatsWork.then(async () => {
+                if (!active()) return;
+                const chat = await discoveredFromMessage(message, lid => session.phoneForLid(lid));
+                if (active()) this.emitChats([chat]);
+              }).catch(() => {
+                if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+              });
+            }
             if (!active() || event.type !== 'notify' || event.requestId) return;
             for (const message of event.messages) {
               const text = incomingPlainText(message);
@@ -270,6 +521,61 @@ export class WhatsAppConnection implements Transport {
                 if (active()) this.update({ errorCode: 'WHATSAPP_INCOMING_PROCESSING_FAILED' });
               });
             }
+          }),
+          session.on('messaging-history.set', event => {
+            if (!active()) return;
+            this.chatsWork = this.chatsWork.then(async () => {
+              if (!active()) return;
+              const messages = await Promise.all(event.messages.map(message => discoveredFromMessage(message, lid => session.phoneForLid(lid))));
+              const chatMessages = await Promise.all(event.chats.flatMap(chat => chat.messages?.map(item => item.message).filter((item): item is WAMessage => !!item) ?? [])
+                .map(message => discoveredFromMessage(message, lid => session.phoneForLid(lid))));
+              const contacts = await Promise.all(event.contacts.map(contact => discoveredFromContact(contact, lid => session.phoneForLid(lid))));
+              const chats = await Promise.all(event.chats.map(chat => discoveredFromChat(chat, lid => session.phoneForLid(lid))));
+              this.emitChats([
+                ...contacts,
+                ...chats,
+                ...messages,
+                ...chatMessages,
+              ]);
+            }).catch(() => {
+              if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+            });
+          }),
+          session.on('chats.upsert', chats => {
+            if (!active()) return;
+            this.chatsWork = this.chatsWork.then(async () => {
+              if (!active()) return;
+              this.emitChats(await Promise.all(chats.map(chat => discoveredFromChat(chat, lid => session.phoneForLid(lid)))));
+            }).catch(() => {
+              if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+            });
+          }),
+          session.on('chats.update', chats => {
+            if (!active()) return;
+            this.chatsWork = this.chatsWork.then(async () => {
+              if (!active()) return;
+              this.emitChats(await Promise.all(chats.map(chat => discoveredFromChat(chat, lid => session.phoneForLid(lid)))));
+            }).catch(() => {
+              if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+            });
+          }),
+          session.on('contacts.upsert', contacts => {
+            if (!active()) return;
+            this.chatsWork = this.chatsWork.then(async () => {
+              if (!active()) return;
+              this.emitChats(await Promise.all(contacts.map(contact => discoveredFromContact(contact, lid => session.phoneForLid(lid)))));
+            }).catch(() => {
+              if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+            });
+          }),
+          session.on('contacts.update', contacts => {
+            if (!active()) return;
+            this.chatsWork = this.chatsWork.then(async () => {
+              if (!active()) return;
+              this.emitChats(await Promise.all(contacts.map(contact => discoveredFromContact(contact, lid => session.phoneForLid(lid)))));
+            }).catch(() => {
+              if (active()) this.update({ errorCode: 'WHATSAPP_DIRECTORY_PROCESSING_FAILED' });
+            });
           }),
           session.on('messages.update', events => {
             if (!active()) return;

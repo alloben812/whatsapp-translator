@@ -17,6 +17,20 @@ export interface Contact {
   language?: ContactLanguageCode;
 }
 
+/** Metadata discovered from WhatsApp. Discovery never enables translation. */
+export interface DiscoveredChat {
+  id: string;
+  name?: string;
+  lastMessageAt?: string;
+  preview?: string;
+}
+
+export interface ChatListEntry extends Contact {
+  translationEnabled: boolean;
+  lastMessageAt: string | null;
+  preview: string | null;
+}
+
 export type MessageStatus =
   | 'translating'
   | 'sending'

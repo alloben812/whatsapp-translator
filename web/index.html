@@ -41,8 +41,13 @@
       <div class="workspace">
         <aside id="sidebar" class="sidebar" aria-label="Ваши чаты">
           <div class="sidebar-heading"><div><p class="eyebrow">НА СВЯЗИ</p><h2>Ваши чаты <span id="contact-count">0</span></h2></div><button id="add-contact" class="icon-button add-button" type="button" aria-label="Добавить собеседника" title="Добавить собеседника">+</button></div>
+          <div id="chat-tools" class="chat-tools" hidden>
+            <input id="chat-search" type="search" autocomplete="off" placeholder="Поиск по чатам" aria-label="Поиск по чатам">
+            <button id="sync-chats" class="text-button sync-chats" type="button">Обновить чаты</button>
+          </div>
+          <p id="chat-sync-status" class="chat-sync-status" role="status" hidden></p>
           <div id="contact-list" class="contact-list"></div>
-          <div id="empty-contacts" class="empty-contacts"><span aria-hidden="true">↗</span><p>С кем поговорим?</p><span>Добавьте имя и номер собеседника, чтобы начать.</span><button id="add-first-contact" class="text-button" type="button">Добавить собеседника</button></div>
+          <div id="empty-contacts" class="empty-contacts"><span aria-hidden="true">↗</span><p id="empty-contacts-title">Загружаем чаты WhatsApp</p><span id="empty-contacts-description">Обновите список, чтобы увидеть привычные чаты из вашего WhatsApp.</span><button id="refresh-empty-chats" class="text-button" type="button">Обновить чаты</button><button id="add-first-contact" class="text-button manual-fallback" type="button">Добавить собеседника вручную</button></div>
           <button id="open-connection" class="button secondary sidebar-connect" type="button" hidden>Подключить WhatsApp ↗</button>
           <div class="sidebar-note"><span class="note-symbol" aria-hidden="true">↔</span><p>Вы пишете по-русски.<br>Собеседник читает на своём языке.<br>Его ответы видите в переводе.</p></div>
         </aside>

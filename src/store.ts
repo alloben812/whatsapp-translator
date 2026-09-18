@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { ServiceError, type Contact, type Message, type MessageStatus } from './domain.js';
+import { isIndividualContactId, ServiceError, type Contact, type Message, type MessageStatus, type DiscoveredChat, type ChatListEntry } from './domain.js';
 import {
   DEFAULT_CONTACT_LANGUAGE, isContactLanguage, isTranslationLanguages, translationLanguages,
   type ContactLanguageCode, type LanguageCode, type TranslationLanguages,
@@ -82,6 +82,9 @@ export class Store {
     } else this.database.exec(schema);
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS discovered_chats (
+        id TEXT PRIMARY KEY, name TEXT, last_message_at TEXT, preview TEXT
+      );
       CREATE UNIQUE INDEX IF NOT EXISTS incoming_identity
         ON messages (contact_id, remote_id) WHERE direction = 'incoming';
       UPDATE messages SET status = 'failed', error_code = 'interrupted_translation'
@@ -126,6 +129,54 @@ export class Store {
   contacts(): Contact[] {
     return this.database.prepare('SELECT id, name, language FROM contacts ORDER BY name, id').all()
       .map(row => ({ id: String(row.id), name: String(row.name), language: String(row.language) as ContactLanguageCode }));
+  }
+
+  saveDiscoveredChats(chats: DiscoveredChat[]): void {
+    const save = this.database.prepare(`INSERT INTO discovered_chats(id,name,last_message_at,preview) VALUES(?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET
+        name=COALESCE(excluded.name,discovered_chats.name),
+        preview=CASE WHEN excluded.last_message_at IS NOT NULL AND
+          (discovered_chats.last_message_at IS NULL OR excluded.last_message_at>=discovered_chats.last_message_at)
+          THEN excluded.preview ELSE discovered_chats.preview END,
+        last_message_at=CASE WHEN excluded.last_message_at IS NOT NULL AND
+          (discovered_chats.last_message_at IS NULL OR excluded.last_message_at>=discovered_chats.last_message_at)
+          THEN excluded.last_message_at ELSE discovered_chats.last_message_at END`);
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      for (const chat of chats.slice(0, 10000)) {
+        if (!isIndividualContactId(chat.id)) continue;
+        const name = typeof chat.name === 'string' && chat.name.trim() ? chat.name.trim().slice(0, 120) : null;
+        const timestamp = chat.lastMessageAt && Number.isFinite(Date.parse(chat.lastMessageAt))
+          ? new Date(chat.lastMessageAt).toISOString() : null;
+        const preview = timestamp && typeof chat.preview === 'string' ? chat.preview.slice(0, 240) : null;
+        save.run(chat.id, name, timestamp, preview);
+      }
+      this.database.exec('COMMIT');
+    } catch (error) { this.database.exec('ROLLBACK'); throw error; }
+  }
+
+  chats(): ChatListEntry[] {
+    const rows = this.database.prepare(`
+      SELECT all_ids.id, COALESCE(c.name,d.name) AS name, COALESCE(c.language,'sr-Latn') AS language,
+        c.id IS NOT NULL AS enabled, d.last_message_at, d.preview
+      FROM (SELECT id FROM contacts UNION SELECT id FROM discovered_chats) all_ids
+      LEFT JOIN contacts c ON c.id=all_ids.id LEFT JOIN discovered_chats d ON d.id=all_ids.id
+      ORDER BY d.last_message_at DESC, name COLLATE NOCASE, all_ids.id LIMIT 10000
+    `).all();
+    return rows.map(row => ({
+      id: String(row.id), name: row.name === null ? '+' + String(row.id).split('@')[0] : String(row.name),
+      language: String(row.language) as ContactLanguageCode, translationEnabled: Boolean(row.enabled),
+      lastMessageAt: row.last_message_at === null ? null : String(row.last_message_at),
+      preview: row.preview === null ? null : String(row.preview),
+    }));
+  }
+
+  openDiscoveredChat(contactId: string): Contact {
+    const existing = this.contacts().find(contact => contact.id === contactId);
+    if (existing) return existing;
+    const chat = this.database.prepare('SELECT name FROM discovered_chats WHERE id=?').get(contactId);
+    if (!chat || !isIndividualContactId(contactId)) throw new ServiceError('unknown_contact', 'Unknown WhatsApp chat.');
+    return this.saveContact({ id: contactId, name: chat.name ? String(chat.name) : '+' + contactId.split('@')[0] });
   }
 
   saveContact(contact: Contact): Contact {

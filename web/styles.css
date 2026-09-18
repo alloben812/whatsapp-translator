@@ -36,15 +36,21 @@ p,h1,h2{margin:0}
 .icon-button{width:34px;height:34px;border-radius:9px;background:transparent;display:grid;place-items:center;color:#687c64;font-size:25px;flex-shrink:0}
 .icon-button:hover{background:#e9eee0}
 .add-button{border:1px solid #dbe3d1;background:#f3f6eb;font-size:23px}
+.chat-tools{display:flex;align-items:center;gap:10px;padding:0 24px 15px}
+.chat-tools input{min-height:37px;padding:8px 10px;font-size:12px;border-radius:9px;background:#f6f8f0}
+.sync-chats{white-space:nowrap;font-size:10px;flex-shrink:0}
+.chat-sync-status{padding:0 25px 12px;color:#8d9a82;font-size:10px;line-height:1.5}
 .contact-list{overflow:auto;padding:0 12px;flex-shrink:1}
 .contact-button{width:100%;display:flex;align-items:center;gap:11px;text-align:left;padding:15px 12px;border-radius:11px;background:transparent;margin-bottom:4px;color:var(--ink)}
 .contact-button:hover{background:#f0f3e9}
 .contact-button[aria-current=true]{background:#eaf0df}
+.contact-button[data-active=false] .contact-name{font-weight:520}
 .avatar{width:41px;height:41px;border-radius:13px;display:grid;place-items:center;flex-shrink:0;font-size:13px;font-weight:600;background:#e3e8dc;color:#6b7e60}
 .contact-button:nth-child(3n+2) .avatar{background:#eee8dc;color:#9c835a}
 .contact-button:nth-child(3n+3) .avatar{background:#dde8e4;color:#69877d}
 .contact-copy{display:block;min-width:0;flex:1}
 .contact-name{display:block;font-size:13px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.translation-chip{display:inline-block;margin-left:6px;padding:2px 5px;border-radius:5px;background:#e5edda;color:#6a7e5b;font-size:8px;font-weight:650;vertical-align:1px}
 .contact-preview{display:block;color:#8a9385;font-size:11px;margin-top:5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .contact-time{align-self:flex-start;margin-top:3px;font-size:9px;color:#919b89}
 .empty-contacts{padding:25px 27px;font-size:12px;line-height:1.7;color:#94a08b}
@@ -52,6 +58,7 @@ p,h1,h2{margin:0}
 .empty-contacts p{font-size:14px;font-weight:550;color:#78886b;margin-bottom:4px}
 .text-button{padding:0;background:transparent;color:#466743;text-align:left;font-size:12px;line-height:1.5;text-decoration:underline;text-underline-offset:4px}
 .empty-contacts .text-button{margin-top:16px}
+.empty-contacts .manual-fallback{display:block;margin-top:8px;color:#7f8f76}
 .sidebar-note{display:flex;gap:11px;align-items:flex-start;margin-top:auto;padding:26px 25px;line-height:1.8;font-size:10px;color:#96a08e}
 .sidebar-connect{margin:20px 24px 0;font-size:11px;flex-shrink:0}
 .note-symbol{font-size:20px;color:#9fae92;line-height:1.2}

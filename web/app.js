@@ -18,6 +18,9 @@ let firstState = true;
 let showingQr = false;
 let changingLanguage = null;
 let speechSession = null;
+let openingChatId = null;
+let syncingChats = false;
+let chatQuery = '';
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const AUDIO_TYPES = ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
 const drafts = new Map();
@@ -57,6 +60,54 @@ function element(tag, className, text) {
 function phone(id) { return `+${String(id).split('@')[0]}`; }
 function initials(name) { return name.trim().split(/\s+/u).slice(0, 2).map((part) => Array.from(part)[0] || '').join('').toLocaleUpperCase('ru'); }
 function contactFor(id) { return state?.contacts.find((contact) => contact.id === id); }
+function nativeChats() {
+  const contacts = state?.contacts || [];
+  const chats = Array.isArray(state?.chats) ? state.chats : [];
+  const seen = new Set(chats.map((chat) => chat.id));
+  return [...chats, ...contacts.filter((contact) => !seen.has(contact.id)).map(contactAsChat)]
+    .map(chatView)
+    .sort((left, right) => {
+      const leftTime = timestamp(left.lastMessageAt);
+      const rightTime = timestamp(right.lastMessageAt);
+      if (leftTime !== rightTime) return rightTime - leftTime;
+      return (left.name || phone(left.id)).localeCompare(right.name || phone(right.id), 'ru');
+    });
+}
+function contactAsChat(contact) {
+  return {
+    id: contact.id, name: contact.name, language: contact.language || 'sr-Latn', translationEnabled: true,
+    lastMessageAt: null,
+    preview: phone(contact.id),
+  };
+}
+function chatView(chat) {
+  const last = latestMessage(chat.id);
+  if (!last || timestamp(chat.lastMessageAt) > timestamp(last.createdAt)) {
+    return { ...chat, name: chat.name || phone(chat.id), lastMessageAt: chat.lastMessageAt || null, preview: chat.preview || phone(chat.id) };
+  }
+  return {
+    ...chat,
+    name: chat.name || phone(chat.id),
+    lastMessageAt: last.createdAt,
+    preview: messagePreview(last),
+  };
+}
+function latestMessage(contactId) {
+  return state?.messages
+    .filter((message) => message.contactId === contactId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1) || null;
+}
+function messagePreview(message) {
+  const text = message.direction === 'incoming' ? message.translatedText || message.originalText : message.originalText;
+  if (message.direction === 'incoming') return text;
+  if (message.status === 'failed') return `Не отправлено: ${text}`;
+  if (message.status === 'unknown') return `Не подтверждено: ${text}`;
+  if (message.status === 'translating') return `Переводим: ${text}`;
+  if (message.status === 'sending') return `Отправляем: ${text}`;
+  return `Вы: ${text}`;
+}
+function chatFor(id) { return nativeChats().find((chat) => chat.id === id); }
 function languages() { return state?.languages || [{ code: 'sr-Latn', label: 'Сербский · латиница' }]; }
 function languageLabel(code) { return code === 'ru' ? 'Русский' : languages().find((item) => item.code === code)?.label || code || 'Язык собеседника'; }
 function fillLanguageSelect(select, value) {
@@ -75,6 +126,10 @@ function fillLanguageSelect(select, value) {
 function time(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+}
+function timestamp(value) {
+  const date = new Date(value || '');
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function readableError(code) {
@@ -120,6 +175,12 @@ function readableError(code) {
     unsupported_audio: 'Этот формат записи не поддерживается. Попробуйте другой браузер или введите текст.',
     audio_too_large: 'Запись слишком большая. Запишите более короткую фразу.',
     network: 'Не удалось связаться с переводчиком. Проверьте подключение к интернету.',
+    chat_sync_unavailable: 'WhatsApp подключён, но список чатов сейчас недоступен. Попробуйте обновить ещё раз.',
+    chat_sync_timeout: 'WhatsApp не успел вернуть список чатов. Попробуйте обновить ещё раз.',
+    chats_unavailable: 'WhatsApp подключён, но список чатов сейчас недоступен. Попробуйте обновить ещё раз.',
+    chats_timeout: 'WhatsApp не успел вернуть список чатов. Попробуйте обновить ещё раз.',
+    chat_directory_unsupported: 'Этот сеанс WhatsApp пока не отдаёт список чатов. Можно выбрать чат вручную.',
+    metadata_unavailable: 'WhatsApp не вернул данные чатов. Можно повторить обновление или добавить собеседника вручную.',
   };
   return messages[String(code || '').toLowerCase()] || 'Не получилось выполнить действие. Попробуйте позже.';
 }
@@ -153,6 +214,7 @@ async function api(path, body, options = {}) {
       throw error;
     }
     if (!data) {
+      if (path === 'chats/sync') return { ok: true };
       const error = new Error('Response unavailable');
       error.code = 'network';
       throw error;
@@ -192,9 +254,13 @@ async function poll({ manual = false } = {}) {
       $('app').hidden = false;
       $('login-view').hidden = true;
       $('network-banner').hidden = true;
-      if (selectedId && !contactFor(selectedId)) selectedId = null;
+      if (selectedId && !contactFor(selectedId)) {
+        selectedId = null;
+        writeStorage(SELECTED_STORAGE, null);
+      }
       if (!selectedId && pending && contactFor(pending.contactId)) selectedId = pending.contactId;
       if (firstState && !selectedId && state.whatsapp.phase !== 'connected') $('app').classList.add('chat-open');
+      if (!selectedId && state.whatsapp.phase === 'connected') $('app').classList.remove('chat-open');
       firstState = false;
       const found = pending && state.messages.find((message) => message.idempotencyKey === pending.idempotencyKey);
       if (found) settlePending(found);
@@ -245,7 +311,7 @@ function restoreFailedOutgoing(id) {
     toast('Откройте чат с этим собеседником и проверьте состояние сообщения.');
     return;
   }
-  if (pending || sending || speechSession || changingLanguage) {
+  if (pending || sending || speechSession || changingLanguage || openingChatId) {
     toast('Сначала дождитесь результата предыдущей отправки.');
     return;
   }
@@ -272,10 +338,12 @@ function render() {
   $('demo-notice').hidden = state.mode !== 'demo';
   $('setup-panel').hidden = connected;
   $('open-connection').hidden = connected;
-  for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation', 'save-contact']) {
+  for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation', 'save-contact', 'refresh-empty-chats', 'sync-chats']) {
     $(id).disabled = !connected || Boolean(speechSession || changingLanguage) || (id === 'save-contact' && savingContact);
     $(id).title = connected ? '' : 'Сначала подключите WhatsApp';
   }
+  $('sync-chats').disabled = !connected || syncingChats || Boolean(openingChatId || speechSession || changingLanguage);
+  $('refresh-empty-chats').disabled = !connected || syncingChats || Boolean(openingChatId || speechSession || changingLanguage);
   $('setup-description').textContent = phase === 'qr' ? 'Отсканируйте код своим телефоном. Этот переводчик появится в списке связанных устройств.'
     : phase === 'connecting' ? 'Устанавливаем соединение. QR-код появится здесь через несколько секунд.'
       : phase === 'logged_out' ? 'Сессия WhatsApp завершена. Подключите свой телефон снова.'
@@ -308,41 +376,86 @@ function translationReason(reason) {
 }
 
 function renderContacts() {
-  const fingerprint = JSON.stringify([state.contacts, state.messages.map((message) => [message.contactId, message.id, message.translatedText]), selectedId]);
+  const fingerprint = JSON.stringify([
+    state.contacts,
+    nativeChats(),
+    state.chatSync,
+    state.messages.map((message) => [message.contactId, message.id, message.createdAt, message.status, message.translatedText]),
+    selectedId,
+    openingChatId,
+    syncingChats,
+    chatQuery,
+  ]);
   if (fingerprint === contactFingerprint) return;
   contactFingerprint = fingerprint;
   const focused = document.activeElement?.dataset?.contactId;
   const fragment = document.createDocumentFragment();
-  for (const contact of state.contacts) {
-    const messages = state.messages.filter((message) => message.contactId === contact.id);
-    const last = messages.at(-1);
+  const chats = nativeChats();
+  const query = chatQuery.trim().toLocaleLowerCase('ru');
+  const filtered = query ? chats.filter((chat) => `${chat.name} ${phone(chat.id)}`.toLocaleLowerCase('ru').includes(query)) : chats;
+  for (const chat of filtered) {
+    const contact = contactFor(chat.id);
+    const active = Boolean(contact);
     const button = element('button', 'contact-button');
     button.type = 'button';
-    button.dataset.contactId = contact.id;
-    button.setAttribute('aria-current', String(contact.id === selectedId));
-    button.setAttribute('aria-label', `${contact.name}, ${phone(contact.id)}`);
-    const avatar = element('span', 'avatar', initials(contact.name));
+    button.dataset.contactId = chat.id;
+    button.dataset.active = String(active);
+    button.setAttribute('aria-current', String(chat.id === selectedId));
+    button.setAttribute('aria-label', `${chat.name}, ${phone(chat.id)}`);
+    const avatar = element('span', 'avatar', initials(chat.name || phone(chat.id)));
     avatar.setAttribute('aria-hidden', 'true');
     button.append(avatar);
     const copy = element('span', 'contact-copy');
-    copy.append(element('span', 'contact-name', contact.name));
-    copy.append(element('span', 'contact-preview', last ? (last.direction === 'outgoing' ? 'Вы: ' : '') + (last.direction === 'incoming' ? last.translatedText || last.originalText : last.originalText) : phone(contact.id)));
+    const nameLine = element('span', 'contact-name');
+    nameLine.append(document.createTextNode(chat.name || phone(chat.id)));
+    if (active) nameLine.append(element('span', 'translation-chip', 'перевод'));
+    copy.append(nameLine);
+    copy.append(element('span', 'contact-preview', openingChatId === chat.id ? 'Открываем чат…' : chat.preview || phone(chat.id)));
     button.append(copy);
-    if (last) button.append(element('span', 'contact-time', time(last.createdAt)));
-    button.addEventListener('click', () => selectContact(contact.id));
+    if (chat.lastMessageAt) button.append(element('span', 'contact-time', time(chat.lastMessageAt)));
+    button.addEventListener('click', () => active ? selectContact(chat.id) : openNativeChat(chat.id));
     fragment.append(button);
   }
   $('contact-list').replaceChildren(fragment);
-  $('empty-contacts').hidden = state.contacts.length > 0;
-  $('contact-count').textContent = String(state.contacts.length);
+  $('chat-tools').hidden = state.whatsapp.phase !== 'connected';
+  renderChatSyncStatus(chats, filtered);
+  $('empty-contacts').hidden = filtered.length > 0;
+  $('contact-count').textContent = String(chats.length);
   if (focused) [...$('contact-list').children].find((node) => node.dataset.contactId === focused)?.focus({ preventScroll: true });
 }
 
+function renderChatSyncStatus(chats, filtered) {
+  const connected = state.whatsapp.phase === 'connected';
+  const sync = state.chatSync || { status: 'idle', errorCode: null, lastSyncedAt: null };
+  const hasQuery = chatQuery.trim().length > 0;
+  $('sync-chats').textContent = syncingChats || sync.status === 'syncing' ? 'Обновляем…' : 'Обновить чаты';
+  $('empty-contacts-title').textContent = !connected ? 'С кем поговорим?'
+    : hasQuery ? 'Ничего не найдено'
+      : sync.status === 'error' ? 'Чаты не обновились'
+        : 'Загружаем чаты WhatsApp';
+  $('empty-contacts-description').textContent = !connected ? 'Подключите WhatsApp, чтобы увидеть свои чаты.'
+    : hasQuery ? 'Измените запрос или обновите список чатов.'
+      : sync.status === 'error' ? `Не удалось получить список чатов: ${readableError(sync.errorCode)}`
+        : 'Обновите список, чтобы увидеть привычные чаты из вашего WhatsApp.';
+  $('refresh-empty-chats').hidden = !connected;
+  $('add-first-contact').hidden = !connected;
+  const parts = [];
+  if (sync.status === 'syncing' || syncingChats) parts.push('Обновляем список чатов WhatsApp…');
+  else if (sync.status === 'error') parts.push(`Не удалось обновить чаты: ${readableError(sync.errorCode)}`);
+  else if (sync.lastSyncedAt && chats.length > 0) parts.push(`Обновлено ${time(sync.lastSyncedAt)}`);
+  if (hasQuery && chats.length > 0) parts.push(`Найдено ${filtered.length}`);
+  $('chat-sync-status').textContent = parts.join(' · ');
+  $('chat-sync-status').hidden = !parts.length;
+}
+
 function selectContact(id) {
-  if (speechSession || changingLanguage) {
-    toast(speechSession ? 'Завершите или отмените диктовку, прежде чем сменить чат.' : 'Сначала дождитесь сохранения языка.');
+  if (speechSession || changingLanguage || openingChatId) {
+    toast(speechSession ? 'Завершите или отмените диктовку, прежде чем сменить чат.'
+      : openingChatId ? 'Сначала дождитесь открытия выбранного чата.'
+        : 'Сначала дождитесь сохранения языка.');
     return;
   }
+  if (!contactFor(id)) return;
   if (selectedId) drafts.set(selectedId, $('message-text').value);
   selectedId = id;
   writeStorage(SELECTED_STORAGE, id);
@@ -354,6 +467,58 @@ function selectContact(id) {
   updateComposer();
   resizeComposer();
   if (window.matchMedia('(min-width: 761px)').matches && !$('message-text').disabled) $('message-text').focus();
+}
+
+async function openNativeChat(id) {
+  if (speechSession || changingLanguage || openingChatId || pending || sending) {
+    toast(speechSession ? 'Завершите или отмените диктовку, прежде чем сменить чат.'
+      : pending || sending ? 'Сначала дождитесь результата предыдущей отправки.'
+        : openingChatId ? 'Сначала дождитесь открытия выбранного чата.'
+          : 'Сначала дождитесь сохранения языка.');
+    return;
+  }
+  const chat = chatFor(id);
+  if (!chat || state?.whatsapp.phase !== 'connected') return;
+  if (selectedId) drafts.set(selectedId, $('message-text').value);
+  openingChatId = id;
+  renderContacts();
+  updateComposer();
+  try {
+    const response = await api('chats/open', { contactId: id });
+    const contact = response.contact || response;
+    if (!contact?.id) throw Object.assign(new Error('Invalid contact'), { code: 'unknown_contact' });
+    if (state) state.contacts = state.contacts.some((item) => item.id === contact.id)
+      ? state.contacts.map((item) => item.id === contact.id ? contact : item)
+      : [...state.contacts, contact];
+    await poll();
+    if (state && !state.contacts.some((item) => item.id === contact.id)) state.contacts = [...state.contacts, contact];
+    openingChatId = null;
+    selectContact(contact.id);
+  } catch (error) {
+    toast(readableError(error.code));
+  } finally {
+    openingChatId = null;
+    if (state) {
+      renderContacts();
+      updateComposer();
+    }
+  }
+}
+
+async function syncNativeChats() {
+  if (syncingChats || state?.whatsapp.phase !== 'connected' || speechSession || changingLanguage || openingChatId) return;
+  syncingChats = true;
+  renderContacts();
+  try {
+    await api('chats/sync', {}, { timeoutMs: 15000 });
+    await poll();
+  } catch (error) {
+    toast(readableError(error.code));
+    await poll();
+  } finally {
+    syncingChats = false;
+    if (state) render();
+  }
 }
 
 function renderConversation(forceScroll = false) {
@@ -449,17 +614,19 @@ function updateComposer() {
   const connected = state?.whatsapp.phase === 'connected';
   const available = state?.translator.ready;
   const networkOk = $('network-banner').hidden;
-  const locked = Boolean(pending) || sending;
+  const locked = Boolean(pending || openingChatId) || sending;
   $('message-text').disabled = !contact || locked;
   const tooLong = $('message-text').value.length > 4000;
   $('send-button').disabled = !contact || !connected || !available || !networkOk || locked || Boolean(speechSession || changingLanguage) || tooLong || !$('message-text').value.trim();
   for (const button of document.querySelectorAll('.restore-message')) {
     button.disabled = locked || Boolean(speechSession || changingLanguage) || button.dataset.contactId !== selectedId;
   }
-  for (const button of document.querySelectorAll('.contact-button')) button.disabled = Boolean(speechSession || changingLanguage);
-  $('back-to-chats').disabled = Boolean(speechSession || changingLanguage);
+  for (const button of document.querySelectorAll('.contact-button')) button.disabled = Boolean(speechSession || changingLanguage || openingChatId);
+  $('back-to-chats').disabled = Boolean(speechSession || changingLanguage || openingChatId);
   $('contact-language').disabled = !contact || locked || Boolean(speechSession || changingLanguage) || !networkOk;
-  for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation']) $(id).disabled = !connected || Boolean(speechSession || changingLanguage);
+  for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation']) $(id).disabled = !connected || Boolean(speechSession || changingLanguage || openingChatId);
+  $('sync-chats').disabled = !connected || syncingChats || Boolean(speechSession || changingLanguage || openingChatId);
+  $('refresh-empty-chats').disabled = !connected || syncingChats || Boolean(speechSession || changingLanguage || openingChatId);
   updateDictation();
   $('send-button').firstElementChild.textContent = sending ? 'Отправляем…' : 'Перевести и отправить';
   $('pending-notice').hidden = !pending;
@@ -468,6 +635,7 @@ function updateComposer() {
     $('pending-description').textContent = `Сообщение для ${recipient?.name || phone(pending.contactId)}. Ответ пока не получен. Повторно не отправляем.`;
   }
   $('compose-help').textContent = speechSession ? 'Диктовка только добавляет текст. Отправка доступна после проверки черновика.'
+    : openingChatId ? 'Открываем выбранный чат. Получатель остаётся неизменным до завершения.'
     : changingLanguage ? 'Сохраняем язык собеседника…'
     : tooLong ? 'Текст длиннее 4000 символов. Разделите его перед отправкой; весь текст сохранён в поле.'
     : pending ? 'Сначала проверьте результат предыдущего сообщения.'
@@ -489,7 +657,7 @@ function updateDictation() {
   const supported = Boolean(recordingType());
   const available = supported && state?.speech?.ready;
   $('start-dictation').hidden = Boolean(speechSession);
-  $('start-dictation').disabled = !available || !contactFor(selectedId) || Boolean(pending || sending || changingLanguage) || !$('network-banner').hidden;
+  $('start-dictation').disabled = !available || !contactFor(selectedId) || Boolean(pending || sending || changingLanguage || openingChatId) || !$('network-banner').hidden;
   $('voice-help').textContent = !supported ? 'Диктовка недоступна в этом браузере. Можно ввести текст вручную.'
     : !state?.speech?.ready ? 'Распознавание пока недоступно. Можно ввести текст вручную.'
       : 'Диктовка добавит текст в черновик. Перед отправкой проверьте его.';
@@ -587,7 +755,7 @@ async function transcribeRecording(session) {
 
 async function startDictation() {
   const mimeType = recordingType();
-  if (!mimeType || !state?.speech?.ready || !contactFor(selectedId) || pending || sending || changingLanguage || speechSession) return;
+  if (!mimeType || !state?.speech?.ready || !contactFor(selectedId) || pending || sending || changingLanguage || openingChatId || speechSession) return;
   const configuredMaximum = Number(state.speech.maxSeconds);
   const session = {
     contactId: selectedId, phase: 'permission', cancelled: false,
@@ -647,20 +815,26 @@ function resizeComposer() {
 }
 
 function openContactDialog() {
-  if (speechSession || changingLanguage) return;
+  if (speechSession || changingLanguage || openingChatId) return;
   $('contact-error').hidden = true;
   $('contact-dialog').showModal();
   $('new-contact-name').focus();
 }
 
 $('add-contact').addEventListener('click', openContactDialog);
+$('chat-search').addEventListener('input', () => {
+  chatQuery = $('chat-search').value;
+  renderContacts();
+});
+$('sync-chats').addEventListener('click', () => { void syncNativeChats(); });
+$('refresh-empty-chats').addEventListener('click', () => { void syncNativeChats(); });
 $('start-dictation').addEventListener('click', () => { void startDictation(); });
 $('stop-dictation').addEventListener('click', stopDictation);
 $('cancel-dictation').addEventListener('click', () => { cancelDictation(); });
 $('contact-language').addEventListener('change', async () => {
   const contact = contactFor(selectedId);
   const language = $('contact-language').value;
-  if (!contact || speechSession || pending || sending || changingLanguage) return;
+  if (!contact || speechSession || pending || sending || changingLanguage || openingChatId) return;
   if (!languages().some((item) => item.code === language) || language === contact.language) return;
   changingLanguage = { contactId: contact.id, language };
   updateComposer();
@@ -685,7 +859,7 @@ $('open-connection').addEventListener('click', () => {
 });
 $('close-contact-dialog').addEventListener('click', () => $('contact-dialog').close());
 $('back-to-chats').addEventListener('click', () => {
-  if (speechSession || changingLanguage) return;
+  if (speechSession || changingLanguage || openingChatId) return;
   $('app').classList.remove('chat-open');
   [...$('contact-list').children].find((node) => node.dataset.contactId === selectedId)?.focus();
 });
@@ -703,7 +877,7 @@ $('message-text').addEventListener('keydown', (event) => {
 
 $('contact-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (savingContact || state?.whatsapp.phase !== 'connected') return;
+  if (savingContact || openingChatId || state?.whatsapp.phase !== 'connected') return;
   const name = $('new-contact-name').value.trim();
   const number = $('new-contact-phone').value.replace(/[\s()-]/g, '');
   if (!/^\+?[1-9]\d{6,14}$/.test(number)) {
@@ -742,7 +916,7 @@ $('connect-button').addEventListener('click', async () => {
 
 $('compose-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if ($('send-button').disabled || pending || sending || speechSession || changingLanguage) return;
+  if ($('send-button').disabled || pending || sending || speechSession || changingLanguage || openingChatId) return;
   // Persist the exact command before the request: a lost HTTP response must never
   // create a new message identity or cause an automatic second send.
   const request = { contactId: selectedId, text: $('message-text').value, idempotencyKey: crypto.randomUUID(), createdAt: new Date().toISOString() };

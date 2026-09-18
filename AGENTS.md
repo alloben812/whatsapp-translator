@@ -10,7 +10,7 @@
 
 ## Current state
 
-The implementation now includes a Baileys adapter, a browser chat, persistent messages/contacts, a subscription translation broker and private systemd deployment. Pairing and a real owner-selected conversation still require live validation; never describe fixture-based tests as a working WhatsApp exchange. Read README.md and docs/ before continuing.
+The implementation now includes a Baileys adapter, a browser chat, persistent messages/contacts, a subscription translation broker and private systemd deployment. The owner has paired WhatsApp; a real owner-selected conversation still requires live validation; never describe fixture-based tests as a working WhatsApp exchange. Native chat discovery stores metadata separately from enabled translation contacts; never translate imported history or reset the paired session just to refresh the directory. Read README.md and docs/ before continuing.
 
 Related private repository: alloben812/multimode-agents. Its documented Hetzner deployment contains isolated subscription runtimes. Inspect current code and server state before reusing them; do not assume a generic model API key or public inference endpoint exists.
 

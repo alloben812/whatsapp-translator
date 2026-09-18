@@ -21,6 +21,11 @@ export interface LiveConnection {
   resolveContact(phone: string): Promise<{ id: string; name?: string } | null>;
 }
 export interface TranslatorStatus { ready: boolean; label: string; reason: string | null }
+export interface ChatSyncStatus {
+  status: 'idle' | 'syncing' | 'ready' | 'error';
+  errorCode: string | null;
+  lastSyncedAt: string | null;
+}
 export interface ApplicationOptions {
   store: Store;
   service: TranslationService;
@@ -28,6 +33,8 @@ export interface ApplicationOptions {
   translatorStatus: () => TranslatorStatus;
   transcriber?: Transcriber;
   speechReady?: () => boolean;
+  chatSyncStatus?: () => ChatSyncStatus;
+  syncChats?: () => Promise<void>;
   webDirectory: string;
   origin: string;
   password?: string;
@@ -164,6 +171,8 @@ export function createApplication(options: ApplicationOptions) {
           translator: options.translatorStatus(), languages: CONTACT_LANGUAGES,
           speech: { ready: Boolean(options.transcriber && options.speechReady?.()), language: 'ru', maxSeconds: 60 },
           contacts: options.store.contacts(), messages: recent,
+          chats: options.store.chats(),
+          chatSync: options.chatSyncStatus?.() ?? { status: 'idle', errorCode: null, lastSyncedAt: null },
         }); return;
       }
       if (request.method !== 'POST') fail('not_found');
@@ -177,6 +186,20 @@ export function createApplication(options: ApplicationOptions) {
       const input = await body(request);
       if (path === '/api/connect') {
         exact(input, []); await options.connection.connect(); send(response, 202, { ok: true }); return;
+      }
+      if (path === '/api/chats/sync') {
+        exact(input, []);
+        if (options.connection.state().phase !== 'connected' || !options.syncChats) fail('whatsapp_unavailable');
+        // The controller records completion/errors; HTTP does not retain the request while syncing.
+        void options.syncChats().catch(() => {});
+        send(response, 202, { ok: true }); return;
+      }
+      if (path === '/api/chats/open') {
+        const value = exact(input, ['contactId']);
+        if (typeof value.contactId !== 'string') fail('invalid_input');
+        const contact = options.store.openDiscoveredChat(value.contactId);
+        options.service.setContacts(options.store.contacts());
+        send(response, 200, contact); return;
       }
       if (path === '/api/contacts') {
         const hasLanguage = input !== null && typeof input === 'object' && 'language' in input;
