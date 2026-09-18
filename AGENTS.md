@@ -18,6 +18,8 @@ The owner clarified that Hetzner is hosting for a standalone translator, not a d
 
 ## Development
 
+Current handoff: the owner explicitly approved re-pairing to recover initial sidebar history. The old auth directory and a consistent database copy are preserved root-only at `/var/lib/whatsapp-translator-backups/before-history-pairing-20260918T195157Z`. A fresh empty auth directory is ready; working database and password were preserved. Await owner login/QR scan, do not reset again. Check the live checkpoint for completion updates.
+
 - Node.js 22.17+, TypeScript, node:sqlite; one service instance per database.
 - Install: npm ci --ignore-scripts.
 - Meaningful behavioral verification: npm test; offline walkthrough: npm run demo.
