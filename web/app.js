@@ -22,6 +22,7 @@ let openingChatId = null;
 let syncingChats = false;
 let chatQuery = '';
 let authGeneration = 0;
+const chatSectionOpen = { archived: false, fallback: false };
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const AUDIO_TYPES = ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
 const drafts = new Map();
@@ -62,40 +63,80 @@ function phone(id) { return `+${String(id).split('@')[0]}`; }
 function initials(name) { return name.trim().split(/\s+/u).slice(0, 2).map((part) => Array.from(part)[0] || '').join('').toLocaleUpperCase('ru'); }
 function contactFor(id) { return state?.contacts.find((contact) => contact.id === id); }
 function nativeChats() {
+  const sections = nativeChatSections();
+  return [...sections.main, ...sections.archived, ...sections.fallback];
+}
+function nativeChatSections() {
   const contacts = state?.contacts || [];
   const chats = Array.isArray(state?.chats) ? state.chats : [];
   const seen = new Set(chats.map((chat) => chat.id));
-  return [...chats, ...contacts.filter((contact) => !seen.has(contact.id)).map(contactAsChat)]
-    .map(chatView)
-    .sort((left, right) => {
-      const leftTime = timestamp(left.lastMessageAt);
-      const rightTime = timestamp(right.lastMessageAt);
-      if (leftTime !== rightTime) return rightTime - leftTime;
-      return (left.name || phone(left.id)).localeCompare(right.name || phone(right.id), 'ru');
-    });
+  const main = [];
+  const archived = [];
+  const fallback = [];
+
+  const route = (chat) => {
+    if (chat.archived) archived.push(chat);
+    else if (chat.hasConversation === true) main.push(chat);
+    else fallback.push({ ...chat, section: 'fallback' });
+  };
+  for (const chat of chats.map(chatView)) route(chat);
+  for (const contact of contacts) {
+    if (!seen.has(contact.id)) route(chatView(contactAsChat(contact)));
+  }
+
+  main.sort(compareNativeChats);
+  archived.sort(compareNativeChats);
+  fallback.sort((left, right) => (left.name || phone(left.id)).localeCompare(right.name || phone(right.id), 'ru'));
+  return { main, archived, fallback };
+}
+function compareNativeChats(left, right) {
+  const leftPinned = timestamp(left.pinnedAt);
+  const rightPinned = timestamp(right.pinnedAt);
+  if (Boolean(leftPinned) !== Boolean(rightPinned)) return rightPinned - leftPinned;
+  if (leftPinned !== rightPinned) return rightPinned - leftPinned;
+  const leftTime = timestamp(left.activityAt);
+  const rightTime = timestamp(right.activityAt);
+  if (leftTime !== rightTime) return rightTime - leftTime;
+  return (left.name || phone(left.id)).localeCompare(right.name || phone(right.id), 'ru');
 }
 function contactAsChat(contact) {
   return {
     id: contact.id, name: contact.name, language: contact.language || 'sr-Latn', translationEnabled: true,
-    lastMessageAt: null,
-    preview: phone(contact.id),
+    lastMessageAt: null, pinnedAt: null, archived: false, hasConversation: false,
+    preview: phone(contact.id), section: 'fallback',
   };
 }
 function chatView(chat) {
+  const name = chat.name || phone(chat.id);
+  const nativeTime = timestamp(chat.lastMessageAt);
+  const confirmed = latestConfirmedOutgoing(chat.id);
+  const confirmedTime = timestamp(confirmed?.createdAt);
+  const hasConversation = chat.hasConversation === true
+    || Boolean(confirmed)
+    || (chat.hasConversation == null && nativeTime > 0);
+  const activityAt = nativeTime > 0 ? chat.lastMessageAt : confirmed?.createdAt ?? null;
   const last = latestMessage(chat.id);
-  if (!last || timestamp(chat.lastMessageAt) > timestamp(last.createdAt)) {
-    return { ...chat, name: chat.name || phone(chat.id), lastMessageAt: chat.lastMessageAt || null, preview: chat.preview || phone(chat.id) };
-  }
+  const preview = last && timestamp(last.createdAt) >= nativeTime ? messagePreview(last) : chat.preview || phone(chat.id);
   return {
     ...chat,
-    name: chat.name || phone(chat.id),
-    lastMessageAt: last.createdAt,
-    preview: messagePreview(last),
+    name,
+    pinnedAt: chat.pinnedAt || null,
+    archived: chat.archived === true,
+    hasConversation,
+    lastMessageAt: chat.lastMessageAt || null,
+    activityAt: confirmedTime > nativeTime ? confirmed.createdAt : activityAt,
+    preview,
   };
 }
 function latestMessage(contactId) {
   return state?.messages
     .filter((message) => message.contactId === contactId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1) || null;
+}
+function latestConfirmedOutgoing(contactId) {
+  return state?.messages
+    .filter((message) => message.contactId === contactId && message.direction === 'outgoing' && ['sent', 'delivered', 'read'].includes(message.status))
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     .at(-1) || null;
 }
@@ -123,6 +164,18 @@ function fillLanguageSelect(select, value) {
     select.dataset.catalog = fingerprint;
   }
   if (catalog.some((item) => item.code === value)) select.value = value;
+}
+function chatDateLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const startOfDate = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  if (startOfDate === startOfToday) return date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1).getTime();
+  if (startOfDate === yesterday) return 'Вчера';
+  if (date.getFullYear() === today.getFullYear()) return date.toLocaleDateString('ru', { day: '2-digit', month: '2-digit' });
+  return date.toLocaleDateString('ru', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 function time(value) {
   const date = new Date(value);
@@ -409,9 +462,11 @@ function translationReason(reason) {
 }
 
 function renderContacts() {
+  const sections = nativeChatSections();
+  const chats = [...sections.main, ...sections.archived, ...sections.fallback];
   const fingerprint = JSON.stringify([
     state.contacts,
-    nativeChats(),
+    sections,
     state.chatSync,
     state.messages.map((message) => [message.contactId, message.id, message.createdAt, message.status, message.translatedText]),
     selectedId,
@@ -423,44 +478,80 @@ function renderContacts() {
   contactFingerprint = fingerprint;
   const focused = document.activeElement?.dataset?.contactId;
   const fragment = document.createDocumentFragment();
-  const chats = nativeChats();
   const query = chatQuery.trim().toLocaleLowerCase('ru');
-  const filtered = query ? chats.filter((chat) => `${chat.name} ${phone(chat.id)}`.toLocaleLowerCase('ru').includes(query)) : chats;
-  for (const chat of filtered) {
-    const contact = contactFor(chat.id);
-    const active = Boolean(contact);
-    const button = element('button', 'contact-button');
-    button.type = 'button';
-    button.dataset.contactId = chat.id;
-    button.dataset.active = String(active);
-    button.setAttribute('aria-current', String(chat.id === selectedId));
-    button.setAttribute('aria-label', `${chat.name}, ${phone(chat.id)}`);
-    const avatar = element('span', 'avatar', initials(chat.name || phone(chat.id)));
-    avatar.setAttribute('aria-hidden', 'true');
-    button.append(avatar);
-    const copy = element('span', 'contact-copy');
-    const nameLine = element('span', 'contact-name');
-    nameLine.append(document.createTextNode(chat.name || phone(chat.id)));
-    if (active) nameLine.append(element('span', 'translation-chip', 'перевод'));
-    copy.append(nameLine);
-    copy.append(element('span', 'contact-preview', openingChatId === chat.id ? 'Открываем чат…' : chat.preview || phone(chat.id)));
-    button.append(copy);
-    if (chat.lastMessageAt) button.append(element('span', 'contact-time', time(chat.lastMessageAt)));
-    button.addEventListener('click', () => active ? selectContact(chat.id) : openNativeChat(chat.id));
-    fragment.append(button);
-  }
+  const filter = (items) => query ? items.filter((chat) => `${chat.name} ${phone(chat.id)} ${chat.preview || ''}`.toLocaleLowerCase('ru').includes(query)) : items;
+  const filtered = { main: filter(sections.main), archived: filter(sections.archived), fallback: filter(sections.fallback) };
+  appendChatRows(fragment, filtered.main, { fallback: false });
+  appendChatGroup(fragment, 'Архив', filtered.archived, { key: 'archived', open: Boolean(query), fallback: false });
+  appendChatGroup(fragment, 'Контакты без истории', filtered.fallback, { key: 'fallback', open: Boolean(query), fallback: true });
   $('contact-list').replaceChildren(fragment);
   $('chat-tools').hidden = state.whatsapp.phase !== 'connected';
-  renderChatSyncStatus(chats, filtered);
-  $('empty-contacts').hidden = filtered.length > 0;
+  renderChatSyncStatus(chats, [...filtered.main, ...filtered.archived, ...filtered.fallback], sections);
+  $('empty-contacts').hidden = filtered.main.length + filtered.archived.length + filtered.fallback.length > 0;
   $('contact-count').textContent = String(chats.length);
-  if (focused) [...$('contact-list').children].find((node) => node.dataset.contactId === focused)?.focus({ preventScroll: true });
+  if (focused) $('contact-list').querySelector(`[data-contact-id="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
-function renderChatSyncStatus(chats, filtered) {
+function appendChatGroup(fragment, title, chats, options = {}) {
+  if (!chats.length) return;
+  const details = document.createElement('details');
+  details.className = 'chat-section';
+  const selectedInside = chats.some((chat) => chat.id === selectedId);
+  const forcedOpen = options.open === true || selectedInside;
+  details.open = forcedOpen || (options.key && chatSectionOpen[options.key] === true);
+  if (options.key) {
+    details.dataset.section = options.key;
+    details.addEventListener('toggle', () => { if (!forcedOpen) chatSectionOpen[options.key] = details.open; });
+  }
+  const summary = element('summary', 'chat-section-title');
+  summary.append(document.createTextNode(title), element('span', 'chat-section-count', String(chats.length)));
+  details.append(summary);
+  appendChatRows(details, chats, options);
+  fragment.append(details);
+}
+
+function appendChatRows(parent, chats, options = {}) {
+  for (const chat of chats) {
+    parent.append(chatButton(chat, options));
+  }
+}
+
+function chatButton(chat, options = {}) {
+  const contact = contactFor(chat.id);
+  const active = Boolean(contact);
+  const button = element('button', `contact-button${options.fallback ? ' contact-button-fallback' : ''}`);
+  button.type = 'button';
+  button.dataset.contactId = chat.id;
+  button.dataset.active = String(active);
+  button.setAttribute('aria-current', String(chat.id === selectedId));
+  button.setAttribute('aria-label', `${chat.name}, ${phone(chat.id)}`);
+  const avatar = element('span', 'avatar', initials(chat.name || phone(chat.id)));
+  avatar.setAttribute('aria-hidden', 'true');
+  button.append(avatar);
+  const copy = element('span', 'contact-copy');
+  const nameLine = element('span', 'contact-name');
+  nameLine.append(document.createTextNode(chat.name || phone(chat.id)));
+  if (!options.fallback && chat.pinnedAt) {
+    const pin = element('span', 'pinned-marker', '●');
+    pin.title = 'Закреплено';
+    pin.setAttribute('aria-label', 'Закреплено');
+    nameLine.append(pin);
+  }
+  if (active) nameLine.append(element('span', 'translation-chip', 'перевод'));
+  copy.append(nameLine);
+  const fallbackPreview = active ? 'Перевод включён вручную' : 'История WhatsApp пока не найдена';
+  copy.append(element('span', 'contact-preview', openingChatId === chat.id ? 'Открываем чат…' : chat.preview || (options.fallback ? fallbackPreview : phone(chat.id))));
+  button.append(copy);
+  if (!options.fallback && chat.activityAt) button.append(element('span', 'contact-time', chatDateLabel(chat.activityAt)));
+  button.addEventListener('click', () => active ? selectContact(chat.id) : openNativeChat(chat.id));
+  return button;
+}
+
+function renderChatSyncStatus(chats, filtered, sections = { main: [], archived: [], fallback: [] }) {
   const connected = state.whatsapp.phase === 'connected';
   const sync = state.chatSync || { status: 'idle', errorCode: null, lastSyncedAt: null };
   const hasQuery = chatQuery.trim().length > 0;
+  const hasFallback = connected && !hasQuery && sections.fallback.length > 0;
   $('sync-chats').textContent = syncingChats || sync.status === 'syncing' ? 'Обновляем…' : 'Обновить чаты';
   $('empty-contacts-title').textContent = !connected ? 'С кем поговорим?'
     : hasQuery ? 'Ничего не найдено'
@@ -476,6 +567,7 @@ function renderChatSyncStatus(chats, filtered) {
   if (sync.status === 'syncing' || syncingChats) parts.push('Обновляем список чатов WhatsApp…');
   else if (sync.status === 'error') parts.push(`Не удалось обновить чаты: ${readableError(sync.errorCode)}`);
   else if (sync.lastSyncedAt && chats.length > 0) parts.push(`Обновлено ${time(sync.lastSyncedAt)}`);
+  if (hasFallback) parts.push('Контакты без данных о переписке показаны отдельно.');
   if (hasQuery && chats.length > 0) parts.push(`Найдено ${filtered.length}`);
   $('chat-sync-status').textContent = parts.join(' · ');
   $('chat-sync-status').hidden = !parts.length;

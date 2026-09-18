@@ -94,7 +94,22 @@ export class Store {
       UPDATE messages SET status = 'unknown', error_code = 'uncertain_delivery'
         WHERE status = 'sending';
     `);
+    this.migrateChatDirectory();
     this.migrateLanguages();
+  }
+
+  private migrateChatDirectory(): void {
+    const columns = new Set(this.database.prepare('PRAGMA table_info(discovered_chats)').all().map(row => row.name));
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      if (!columns.has('pinned_at')) this.database.exec('ALTER TABLE discovered_chats ADD COLUMN pinned_at TEXT');
+      if (!columns.has('archived')) this.database.exec('ALTER TABLE discovered_chats ADD COLUMN archived INTEGER');
+      if (!columns.has('has_conversation')) {
+        this.database.exec('ALTER TABLE discovered_chats ADD COLUMN has_conversation INTEGER NOT NULL DEFAULT 0');
+        this.database.exec('UPDATE discovered_chats SET has_conversation=1 WHERE last_message_at IS NOT NULL');
+      }
+      this.database.exec('COMMIT');
+    } catch (error) { this.database.exec('ROLLBACK'); this.database.close(); throw error; }
   }
 
   private migrateLanguages(): void {
@@ -136,12 +151,17 @@ export class Store {
   saveDiscoveredChats(chats: DiscoveredChat[]): void {
     const exists = this.database.prepare('SELECT 1 FROM discovered_chats WHERE id=?');
     const count = this.database.prepare('SELECT COUNT(*) AS count FROM discovered_chats');
-    const save = this.database.prepare(`INSERT INTO discovered_chats(id,name,last_message_at,preview) VALUES(?,?,?,?)
+    const save = this.database.prepare(`INSERT INTO discovered_chats(id,name,last_message_at,preview,pinned_at,archived,has_conversation) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         name=COALESCE(excluded.name,discovered_chats.name),
+        pinned_at=CASE WHEN ? THEN excluded.pinned_at ELSE discovered_chats.pinned_at END,
+        archived=COALESCE(excluded.archived,discovered_chats.archived),
+        has_conversation=MAX(excluded.has_conversation,discovered_chats.has_conversation),
         preview=CASE WHEN excluded.last_message_at IS NOT NULL AND
           (discovered_chats.last_message_at IS NULL OR excluded.last_message_at>=discovered_chats.last_message_at)
-          THEN excluded.preview ELSE discovered_chats.preview END,
+          THEN CASE WHEN excluded.last_message_at=discovered_chats.last_message_at AND excluded.preview IS NULL
+            THEN discovered_chats.preview ELSE excluded.preview END
+          ELSE discovered_chats.preview END,
         last_message_at=CASE WHEN excluded.last_message_at IS NOT NULL AND
           (discovered_chats.last_message_at IS NULL OR excluded.last_message_at>=discovered_chats.last_message_at)
           THEN excluded.last_message_at ELSE discovered_chats.last_message_at END`);
@@ -153,12 +173,17 @@ export class Store {
         const timestamp = chat.lastMessageAt && Number.isFinite(Date.parse(chat.lastMessageAt))
           ? new Date(chat.lastMessageAt).toISOString() : null;
         const preview = timestamp && typeof chat.preview === 'string' ? chat.preview.slice(0, 240) : null;
+        const pinnedAt = typeof chat.pinnedAt === 'string' && Number.isFinite(Date.parse(chat.pinnedAt))
+          ? new Date(chat.pinnedAt).toISOString() : null;
+        const pinUpdate = chat.pinnedAt === null || pinnedAt !== null;
+        const archived = typeof chat.archived === 'boolean' ? Number(chat.archived) : null;
+        const hasConversation = Boolean(chat.hasConversation || timestamp || pinnedAt || chat.archived === true);
         const known = Boolean(exists.get(chat.id));
         if (!known) {
           const row = count.get() as { count: number };
           if (row.count >= MAX_DISCOVERED_CHATS) continue;
         }
-        save.run(chat.id, name, timestamp, preview);
+        save.run(chat.id, name, timestamp, preview, pinnedAt, archived, Number(hasConversation), Number(pinUpdate));
       }
       this.database.exec('COMMIT');
     } catch (error) { this.database.exec('ROLLBACK'); throw error; }
@@ -167,16 +192,20 @@ export class Store {
   chats(): ChatListEntry[] {
     const rows = this.database.prepare(`
       SELECT all_ids.id, COALESCE(c.name,d.name) AS name, COALESCE(c.language,'sr-Latn') AS language,
-        c.id IS NOT NULL AS enabled, d.last_message_at, d.preview
+        c.id IS NOT NULL AS enabled, d.last_message_at, d.preview, d.pinned_at, d.archived, d.has_conversation
       FROM (SELECT id FROM contacts UNION SELECT id FROM discovered_chats) all_ids
       LEFT JOIN contacts c ON c.id=all_ids.id LEFT JOIN discovered_chats d ON d.id=all_ids.id
-      ORDER BY d.last_message_at DESC, name COLLATE NOCASE, all_ids.id LIMIT 10000
+      ORDER BY COALESCE(d.has_conversation,0) DESC, COALESCE(d.archived,0),
+        d.pinned_at DESC, d.last_message_at DESC, name COLLATE NOCASE, all_ids.id LIMIT 10000
     `).all();
     return rows.map(row => ({
       id: String(row.id), name: row.name === null ? '+' + String(row.id).split('@')[0] : String(row.name),
       language: String(row.language) as ContactLanguageCode, translationEnabled: Boolean(row.enabled),
       lastMessageAt: row.last_message_at === null ? null : String(row.last_message_at),
       preview: row.preview === null ? null : String(row.preview),
+      pinnedAt: row.pinned_at === null ? null : String(row.pinned_at),
+      archived: row.archived === null ? null : Boolean(row.archived),
+      hasConversation: Boolean(row.has_conversation),
     }));
   }
 

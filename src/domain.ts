@@ -23,12 +23,19 @@ export interface DiscoveredChat {
   name?: string;
   lastMessageAt?: string;
   preview?: string;
+  /** Omitted metadata must not clear an earlier WhatsApp update. */
+  pinnedAt?: string | null;
+  archived?: boolean;
+  hasConversation?: boolean;
 }
 
 export interface ChatListEntry extends Contact {
   translationEnabled: boolean;
   lastMessageAt: string | null;
   preview: string | null;
+  pinnedAt: string | null;
+  archived: boolean | null;
+  hasConversation: boolean;
 }
 
 export type MessageStatus =

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import type { BaileysEventMap, WAMessage } from '@whiskeysockets/baileys';
+import type { BaileysEventMap, Chat, WAMessage } from '@whiskeysockets/baileys';
 import type { DiscoveredChat, IncomingMessage } from '../src/domain.js';
 import { incomingPlainText, resolveMessageContact, shouldSyncDirectoryHistoryMessage, WhatsAppConnection, type WhatsAppSession } from '../src/whatsapp.js';
 
@@ -17,7 +17,7 @@ class FakeSession implements WhatsAppSession {
   sent: { contactId: string; text: string; messageId: string | undefined }[] = [];
   lookups: string[] = [];
   lookupResult: { jid: string; exists: boolean }[] | undefined = [{ jid: CONTACT, exists: true }];
-  returnedId: string | null = MESSAGE_ID;
+  returnedId: string | { messageId: string; timestamp?: unknown } | null = MESSAGE_ID;
   saveCount = 0;
   syncCount = 0;
   stopCount = 0;
@@ -37,7 +37,7 @@ class FakeSession implements WhatsAppSession {
     this.lookups.push(phone);
     return this.lookupResult;
   }
-  async sendText(contactId: string, text: string, messageId?: string): Promise<string | null> {
+  async sendText(contactId: string, text: string, messageId?: string): Promise<string | { messageId: string; timestamp?: unknown } | null> {
     this.sent.push({ contactId, text, messageId });
     if (this.failSend) throw new Error('private provider payload');
     return this.returnedId;
@@ -180,8 +180,10 @@ test('directory metadata is emitted from contacts, chats, history and own messag
   assert.equal(socket.sent.length, 0);
   assert.equal(byId(directory, CONTACT).preview, 'Вчерашний ответ');
   assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:13:22.000Z');
+  assert.equal(byId(directory, CONTACT).hasConversation, true);
   assert.equal(directory.some(item => item.id === CONTACT && item.name === 'Имя владельца'), false);
   assert.equal(byId(directory, OTHER).name, 'Ана');
+  assert.equal(byId(directory, OTHER).hasConversation, undefined);
   assert.equal(directory.some(item => item.id === '888@lid'), false);
   assert.equal(directory.some(item => item.id === '123@g.us'), false);
 });
@@ -208,6 +210,122 @@ test('directory merge keeps newest preview regardless of history event order', a
   await h.connection.close();
   assert.equal(byId(directory, CONTACT).preview, 'Новый preview');
   assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:15:00.000Z');
+});
+
+test('chat metadata uses absolute latest native timestamp and recv timestamp only as fallback', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  const olderReal = textMessage(CONTACT, 'older-real', 'Older preview');
+  olderReal.messageTimestamp = 1_700_000_050_000;
+  socket.emit('chats.upsert', [{
+    id: CONTACT,
+    lastMessageRecvTimestamp: 1_700_000_200,
+    conversationTimestamp: 1_700_000_075,
+    lastMsgTimestamp: 1_700_000_100,
+    messages: [{ message: olderReal }],
+  }]);
+  socket.emit('chats.update', [{ id: OTHER, lastMessageRecvTimestamp: 1_600_000_000 }]);
+  await flush();
+  await flush();
+  await h.connection.close();
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:15:00.000Z');
+  assert.equal(byId(directory, CONTACT).preview, undefined);
+  assert.equal(byId(directory, CONTACT).hasConversation, true);
+  assert.equal(byId(directory, OTHER).lastMessageAt, '2020-09-13T12:26:40.000Z');
+  assert.equal(byId(directory, OTHER).hasConversation, undefined);
+});
+
+test('pin null clears, archive false is preserved, and contact updates do not mark conversations', async () => {
+  const batches: DiscoveredChat[][] = [];
+  const h = harness(undefined, chats => { batches.push(chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  socket.emit('contacts.upsert', [{ id: CONTACT, name: 'Only contact' }]);
+  socket.emit('chats.upsert', [{ id: CONTACT, pinned: 1_700_000_010, archived: true }]);
+  socket.emit('chats.update', [{ id: CONTACT, pinned: null, archived: false }]);
+  await flush();
+  await flush();
+  await h.connection.close();
+  assert.deepEqual(batches[0]![0], { id: CONTACT, name: 'Only contact' });
+  assert.equal(byId(batches.flat(), CONTACT).pinnedAt, null);
+  assert.equal(byId(batches.flat(), CONTACT).archived, false);
+  assert.equal(byId(batches.flat(), CONTACT).hasConversation, undefined);
+});
+
+test('invalid timestamps are ignored without clearing pins or aborting metadata batches', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  const invalid = textMessage(CONTACT, 'invalid-time', 'Should not order');
+  invalid.messageTimestamp = Number.MAX_VALUE;
+  const valid = textMessage(OTHER, 'valid-time', 'Still processed');
+  valid.messageTimestamp = 1_700_000_010;
+  socket.emit('chats.upsert', [{ id: CONTACT, pinned: 1_700_000_001, archived: true }]);
+  socket.emit('messaging-history.set', { contacts: [], chats: [], messages: [invalid, valid], isLatest: true });
+  socket.emit('chats.update', [{ id: CONTACT, pinned: Number.MAX_VALUE, archived: undefined } as unknown as Partial<Chat>]);
+  socket.emit('chats.update', [{ id: CONTACT, pinned: undefined, archived: undefined } as unknown as Partial<Chat>]);
+  socket.emit('chats.update', [{ id: CONTACT, pinned: 0 }]);
+  await flush();
+  await flush();
+  await h.connection.close();
+  const updates = directory.filter(item => item.id === CONTACT);
+  assert.equal(updates[0]!.pinnedAt, '2023-11-14T22:13:21.000Z');
+  assert.equal(updates[1]!.pinnedAt, undefined);
+  assert.equal(updates[1]!.archived, undefined);
+  assert.equal(updates[2]!.pinnedAt, undefined);
+  assert.equal(updates.at(-1)!.pinnedAt, null);
+  assert.equal(byId(directory, CONTACT).lastMessageAt, undefined);
+  assert.equal(byId(directory, OTHER).lastMessageAt, '2023-11-14T22:13:30.000Z');
+  assert.equal(byId(directory, OTHER).preview, 'Still processed');
+});
+
+test('protocol and reaction messages do not affect ordering or conversation flags', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  const real = textMessage(CONTACT, 'real', 'Real text');
+  real.messageTimestamp = 1_700_000_000;
+  const protocol = textMessage(CONTACT, 'protocol', 'Fake newer text');
+  protocol.messageTimestamp = 1_800_000_000;
+  protocol.message = { protocolMessage: {} };
+  const reaction = textMessage(CONTACT, 'reaction', 'Fake reaction');
+  reaction.messageTimestamp = 1_900_000_000;
+  reaction.message = { reactionMessage: { key: { remoteJid: CONTACT, id: 'real', fromMe: false }, text: '👍' } };
+  socket.emit('messages.upsert', { type: 'append', messages: [real, protocol, reaction] });
+  await flush();
+  await h.connection.close();
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:13:20.000Z');
+  assert.equal(byId(directory, CONTACT).preview, 'Real text');
+  assert.equal(byId(directory, CONTACT).hasConversation, true);
+});
+
+test('media-only messages count for directory ordering with generic previews only', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  const voice = textMessage(CONTACT, 'voice', 'ignored helper text');
+  voice.messageTimestamp = 1_700_000_300;
+  voice.message = { audioMessage: { seconds: 2, ptt: true } };
+  const image = textMessage(OTHER, 'image', 'ignored helper text');
+  image.messageTimestamp = 1_700_000_301;
+  image.message = { imageMessage: {} };
+  socket.emit('messages.upsert', { type: 'append', messages: [voice, image] });
+  await flush();
+  await h.connection.close();
+  assert.equal(byId(directory, CONTACT).preview, 'Голосовое сообщение');
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:18:20.000Z');
+  assert.equal(byId(directory, OTHER).preview, 'Фото');
+  assert.equal(h.incoming.length, 0);
 });
 
 test('LID handling accepts authoritative mappings, strips devices, drops ambiguity and never guesses a phone', async () => {
@@ -250,6 +368,30 @@ test('send forwards the saved message identity once and reconnect does not repla
   await h.connection.close();
 });
 
+test('successful own send emits directory activity, but failed sends do not', async () => {
+  const directory: DiscoveredChat[] = [];
+  const h = harness(undefined, chats => { directory.push(...chats); });
+  await h.connection.connect();
+  const socket = h.sessions[0]!;
+  socket.opened();
+  socket.returnedId = { messageId: MESSAGE_ID, timestamp: 1_700_000_123 };
+  assert.deepEqual(await h.connection.send(CONTACT, 'Zdravo', MESSAGE_ID), { messageId: MESSAGE_ID });
+  assert.equal(byId(directory, CONTACT).lastMessageAt, '2023-11-14T22:15:23.000Z');
+  assert.equal(byId(directory, CONTACT).preview, 'Zdravo');
+  assert.equal(byId(directory, CONTACT).hasConversation, true);
+  socket.returnedId = { messageId: '3EB0TESTMESSAGE002', timestamp: Number.MAX_VALUE };
+  const beforeFallback = Date.now();
+  assert.deepEqual(await h.connection.send(OTHER, 'Fallback time', '3EB0TESTMESSAGE002'), { messageId: '3EB0TESTMESSAGE002' });
+  const fallbackAt = Date.parse(byId(directory, OTHER).lastMessageAt!);
+  assert.ok(fallbackAt >= beforeFallback && fallbackAt <= Date.now() + 1000);
+  assert.equal(byId(directory, OTHER).preview, 'Fallback time');
+  const beforeFailure = directory.length;
+  socket.failSend = true;
+  await assert.rejects(h.connection.send(CONTACT, 'Neuspešno', '3EB0TESTMESSAGE002'), { code: 'WHATSAPP_SEND_UNCERTAIN' });
+  assert.equal(directory.length, beforeFailure);
+  await h.connection.close();
+});
+
 test('send rejects invalid recipient or identity before transport and mismatched returned identity stays uncertain', async () => {
   const h = harness();
   await h.connection.connect();
@@ -261,6 +403,9 @@ test('send rejects invalid recipient or identity before transport and mismatched
   socket.returnedId = 'DIFFERENT_ID';
   await assert.rejects(h.connection.send(CONTACT, 'Zdravo', MESSAGE_ID), { code: 'WHATSAPP_SEND_UNCERTAIN' });
   assert.equal(socket.sent.length, 1);
+  socket.returnedId = '';
+  await assert.rejects(h.connection.send(CONTACT, 'Zdravo'), { code: 'WHATSAPP_SEND_UNCERTAIN' });
+  assert.equal(socket.sent.length, 2);
   await h.connection.close();
 });
 

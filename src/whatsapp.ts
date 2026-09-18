@@ -11,6 +11,7 @@ export type WhatsAppState = {
 };
 
 type Receipt = { contactId: string; messageId: string; status: 'sent' | 'delivered' | 'read' };
+type SendTextResult = string | { messageId: string; timestamp?: unknown } | null;
 type EventName =
   | 'connection.update'
   | 'creds.update'
@@ -28,7 +29,7 @@ export interface WhatsAppSession {
   account(): string | null;
   phoneForLid(lid: string): Promise<string | null>;
   lookup(phone: string): Promise<{ jid: string; exists: boolean }[] | undefined>;
-  sendText(contactId: string, text: string, messageId?: string): Promise<string | null>;
+  sendText(contactId: string, text: string, messageId?: string): Promise<SendTextResult>;
   syncContacts?(): Promise<void>;
   saveCredentials(): Promise<void>;
   stop(): Promise<void>;
@@ -170,7 +171,7 @@ async function createBaileysSession(authDirectory: string): Promise<WhatsAppSess
     lookup: phone => socket.onWhatsApp(phone),
     async sendText(contactId, text, messageId) {
       const result = await socket.sendMessage(contactId, { text, linkPreview: null }, messageId ? { messageId } : {});
-      return result?.key.id ?? null;
+      return result?.key.id ? { messageId: result.key.id, timestamp: result.messageTimestamp } : null;
     },
     syncContacts: async () => {
       const startedAt = Date.now();
@@ -223,29 +224,113 @@ function numberValue(value: unknown): number | null {
   return null;
 }
 
-function isoTimestamp(value: unknown): string | undefined {
+const MAX_DATE_MILLIS = 8_640_000_000_000_000;
+
+function timestampMillis(value: unknown): number | null {
   const timestamp = numberValue(value);
-  if (timestamp === null || timestamp <= 0) return undefined;
+  if (timestamp === null || timestamp <= 0) return null;
   const millis = timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
+  return Number.isFinite(millis) && millis > 0 && millis <= MAX_DATE_MILLIS ? millis : null;
+}
+
+function isoTimestamp(value: unknown): string | undefined {
+  const millis = timestampMillis(value);
+  if (millis === null) return undefined;
   return new Date(millis).toISOString();
 }
 
+function directoryMessageContent(message: WAMessage): NonNullable<WAMessage['message']> | undefined {
+  let content = message.message;
+  for (let depth = 0; depth < 3 && content; depth += 1) {
+    if (content.ephemeralMessage?.message) { content = content.ephemeralMessage.message; continue; }
+    if (content.viewOnceMessage?.message) { content = content.viewOnceMessage.message; continue; }
+    if (content.viewOnceMessageV2?.message) { content = content.viewOnceMessageV2.message; continue; }
+    if (content.viewOnceMessageV2Extension?.message) { content = content.viewOnceMessageV2Extension.message; continue; }
+    break;
+  }
+  return content ?? undefined;
+}
+
 function messagePreview(message: WAMessage): string | undefined {
-  const content = message.message;
+  const content = directoryMessageContent(message);
   if (!content) return undefined;
   return nonEmptyString(content.conversation)
     ?? nonEmptyString(content.extendedTextMessage?.text)
     ?? nonEmptyString(content.imageMessage?.caption)
     ?? nonEmptyString(content.videoMessage?.caption)
-    ?? nonEmptyString(content.documentMessage?.caption);
+    ?? nonEmptyString(content.documentMessage?.caption)
+    ?? (content.audioMessage ? 'Голосовое сообщение' : undefined)
+    ?? (content.imageMessage ? 'Фото' : undefined)
+    ?? (content.videoMessage ? 'Видео' : undefined)
+    ?? (content.stickerMessage ? 'Стикер' : undefined)
+    ?? (content.documentMessage ? 'Документ' : undefined)
+    ?? (content.contactMessage || content.contactsArrayMessage ? 'Контакт' : undefined)
+    ?? (content.locationMessage || content.liveLocationMessage ? 'Локация' : undefined);
 }
 
-function discoveredChat(fields: { id: string; name?: string | undefined; lastMessageAt?: string | undefined; preview?: string | undefined }): DiscoveredChat {
+function discoveredChat(fields: {
+  id: string;
+  name?: string | undefined;
+  lastMessageAt?: string | undefined;
+  preview?: string | undefined;
+  pinnedAt?: string | null | undefined;
+  archived?: boolean | undefined;
+  hasConversation?: boolean | undefined;
+}): DiscoveredChat {
   const chat: DiscoveredChat = { id: fields.id };
   if (fields.name !== undefined) chat.name = fields.name;
   if (fields.lastMessageAt !== undefined) chat.lastMessageAt = fields.lastMessageAt;
   if (fields.preview !== undefined) chat.preview = fields.preview;
+  if (fields.pinnedAt !== undefined) chat.pinnedAt = fields.pinnedAt;
+  if (fields.archived !== undefined) chat.archived = fields.archived;
+  if (fields.hasConversation !== undefined) chat.hasConversation = fields.hasConversation;
   return chat;
+}
+
+function isRealDirectoryMessage(message: WAMessage): boolean {
+  if (!message.message || message.messageStubType != null) return false;
+  const content = directoryMessageContent(message);
+  if (!content) return false;
+  if (content.protocolMessage || content.reactionMessage || content.pollUpdateMessage) return false;
+  return messagePreview(message) !== undefined;
+}
+
+function newestRealMessage(messages: WAMessage[]): WAMessage | undefined {
+  let selected: { message: WAMessage; timestamp: number } | undefined;
+  for (const message of messages) {
+    if (!isRealDirectoryMessage(message)) continue;
+    const timestamp = timestampMillis(message.messageTimestamp);
+    if (timestamp === null || timestamp <= 0) continue;
+    if (!selected || timestamp > selected.timestamp) selected = { message, timestamp };
+  }
+  return selected?.message;
+}
+
+function nativeChatTimestamp(chat: Partial<Chat>, latestReal: WAMessage | undefined): string | undefined {
+  const latestRealTimestamp = timestampMillis(latestReal?.messageTimestamp);
+  const primary = [
+    latestRealTimestamp,
+    timestampMillis(chat.lastMsgTimestamp),
+    timestampMillis(chat.conversationTimestamp),
+  ].filter((value): value is number => value !== null && value > 0);
+  const selected = primary.length ? Math.max(...primary) : timestampMillis(chat.lastMessageRecvTimestamp);
+  return selected !== null && selected > 0 ? new Date(selected).toISOString() : undefined;
+}
+
+function pinnedTimestamp(chat: Partial<Chat>): string | null | undefined {
+  if (!Object.hasOwn(chat, 'pinned') || chat.pinned === undefined) return undefined;
+  const pinnedValue = numberValue(chat.pinned);
+  if (chat.pinned === null || pinnedValue === 0) return null;
+  return isoTimestamp(chat.pinned);
+}
+
+function archivedFlag(chat: Partial<Chat>): boolean | undefined {
+  return typeof chat.archived === 'boolean' && Object.hasOwn(chat, 'archived') ? chat.archived : undefined;
+}
+
+function previewForTimestamp(message: WAMessage | undefined, lastMessageAt: string | undefined): string | undefined {
+  if (!message || !lastMessageAt) return undefined;
+  return isoTimestamp(message.messageTimestamp) === lastMessageAt ? messagePreview(message) : undefined;
 }
 
 async function discoveredFromContact(
@@ -263,16 +348,21 @@ async function discoveredFromChat(
 ): Promise<DiscoveredChat | null> {
   const id = await phoneForDirectJid(chat.id, chat.pnJid, phoneForLid);
   if (!id) return null;
-  const latest = chat.messages?.map(item => item.message).filter((item): item is WAMessage => !!item)[0];
+  const latest = newestRealMessage(chat.messages?.map(item => item.message).filter((item): item is WAMessage => !!item) ?? []);
+  const lastMessageAt = nativeChatTimestamp(chat, latest);
   return discoveredChat({
     id,
     name: nonEmptyString(chat.name) ?? nonEmptyString(chat.displayName) ?? nonEmptyString(chat.username),
-    lastMessageAt: isoTimestamp(chat.lastMessageRecvTimestamp ?? chat.lastMsgTimestamp ?? chat.conversationTimestamp),
-    preview: latest ? messagePreview(latest) : undefined,
+    lastMessageAt,
+    preview: previewForTimestamp(latest, lastMessageAt),
+    pinnedAt: pinnedTimestamp(chat),
+    archived: archivedFlag(chat),
+    hasConversation: latest ? true : undefined,
   });
 }
 
 async function discoveredFromMessage(message: WAMessage, phoneForLid: (lid: string) => Promise<string | null>): Promise<DiscoveredChat | null> {
+  if (!isRealDirectoryMessage(message)) return null;
   const contactId = await resolveMessageContact(message.key, phoneForLid);
   if (!contactId) return null;
   return discoveredChat({
@@ -280,7 +370,23 @@ async function discoveredFromMessage(message: WAMessage, phoneForLid: (lid: stri
     name: message.key.fromMe ? undefined : nonEmptyString(message.pushName) ?? nonEmptyString(message.verifiedBizName),
     lastMessageAt: isoTimestamp(message.messageTimestamp),
     preview: messagePreview(message),
+    hasConversation: true,
   });
+}
+
+function sentMessageMetadata(contactId: string, text: string, timestamp: unknown, now: () => Date = () => new Date()): DiscoveredChat {
+  return discoveredChat({
+    id: contactId,
+    lastMessageAt: isoTimestamp(timestamp) ?? now().toISOString(),
+    preview: text.length > 240 ? `${text.slice(0, 240)}…` : text,
+    hasConversation: true,
+  });
+}
+
+function parseSendTextResult(result: SendTextResult): { messageId: string; timestamp?: unknown } | null {
+  if (typeof result === 'string') return result.trim() ? { messageId: result } : null;
+  if (result && typeof result === 'object' && typeof result.messageId === 'string' && result.messageId.trim()) return result;
+  return null;
 }
 
 function timestampMs(value: string | undefined): number | null {
@@ -296,15 +402,32 @@ function mergeDiscoveredChats(chats: (DiscoveredChat | null)[]): DiscoveredChat[
     const existing = merged.get(chat.id);
     const existingAt = timestampMs(existing?.lastMessageAt);
     const chatAt = timestampMs(chat.lastMessageAt);
-    const useMessageMetadata = chatAt !== null
-      ? existingAt === null || chatAt >= existingAt
-      : existingAt === null && existing?.preview === undefined;
-    merged.set(chat.id, discoveredChat({
+    const next = discoveredChat({
       id: chat.id,
       name: chat.name ?? existing?.name,
-      lastMessageAt: useMessageMetadata ? chat.lastMessageAt ?? existing?.lastMessageAt : existing?.lastMessageAt,
-      preview: useMessageMetadata ? chat.preview ?? existing?.preview : existing?.preview,
-    }));
+      pinnedAt: chat.pinnedAt !== undefined ? chat.pinnedAt : existing?.pinnedAt,
+      archived: chat.archived !== undefined ? chat.archived : existing?.archived,
+      hasConversation: chat.hasConversation === true ? true : existing?.hasConversation,
+    });
+    if (chatAt !== null) {
+      if (existingAt === null || chatAt > existingAt) {
+        if (chat.lastMessageAt !== undefined) next.lastMessageAt = chat.lastMessageAt;
+        if (chat.preview !== undefined) next.preview = chat.preview;
+      } else if (chatAt === existingAt) {
+        const lastMessageAt = existing?.lastMessageAt ?? chat.lastMessageAt;
+        const preview = chat.preview ?? existing?.preview;
+        if (lastMessageAt !== undefined) next.lastMessageAt = lastMessageAt;
+        if (preview !== undefined) next.preview = preview;
+      } else {
+        if (existing?.lastMessageAt !== undefined) next.lastMessageAt = existing.lastMessageAt;
+        if (existing?.preview !== undefined) next.preview = existing.preview;
+      }
+    } else {
+      if (existing?.lastMessageAt !== undefined) next.lastMessageAt = existing.lastMessageAt;
+      const preview = existing?.preview ?? chat.preview;
+      if (preview !== undefined) next.preview = preview;
+    }
+    merged.set(chat.id, next);
   }
   return [...merged.values()];
 }
@@ -416,9 +539,10 @@ export class WhatsAppConnection implements Transport {
     }
     const session = this.connectedSession();
     try {
-      const returnedId = await session.sendText(contactId, text, messageId);
-      if (!returnedId || (messageId !== undefined && returnedId !== messageId)) throw new Error('MESSAGE_ID_MISMATCH');
-      return { messageId: returnedId };
+      const result = parseSendTextResult(await session.sendText(contactId, text, messageId));
+      if (!result || (messageId !== undefined && result.messageId !== messageId)) throw new Error('MESSAGE_ID_MISMATCH');
+      this.emitChats([sentMessageMetadata(contactId, text, result.timestamp)]);
+      return { messageId: result.messageId };
     } catch {
       // The application preserves its identity and marks delivery unknown; never retry here.
       throw new ServiceError('WHATSAPP_SEND_UNCERTAIN', 'The result of this send is uncertain.');

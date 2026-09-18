@@ -42,6 +42,12 @@ p,h1,h2{margin:0}
 .sync-chats{white-space:nowrap;font-size:10px;flex-shrink:0}
 .chat-sync-status{padding:0 25px 12px;color:#8d9a82;font-size:10px;line-height:1.5}
 .contact-list{overflow:auto;padding:0 12px;flex-shrink:1}
+.chat-section{margin:4px 0 8px}
+.chat-section-title{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 12px 8px;color:#87937e;font-size:10px;font-weight:650;letter-spacing:.6px;text-transform:uppercase;cursor:pointer}
+.chat-section-title::-webkit-details-marker{display:none}
+.chat-section-title::after{content:'›';font-size:14px;transform:rotate(90deg);transition:transform .15s;color:#a0ab98}
+.chat-section:not([open]) .chat-section-title::after{transform:rotate(0deg)}
+.chat-section-count{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:6px;background:#edf1e5;color:#7f8c78;font-size:10px;letter-spacing:0;text-transform:none}
 .contact-button{width:100%;display:flex;align-items:center;gap:11px;text-align:left;padding:15px 12px;border-radius:11px;background:transparent;margin-bottom:4px;color:var(--ink)}
 .contact-button:hover{background:#f0f3e9}
 .contact-button[aria-current=true]{background:#eaf0df}
@@ -51,6 +57,7 @@ p,h1,h2{margin:0}
 .contact-button:nth-child(3n+3) .avatar{background:#dde8e4;color:#69877d}
 .contact-copy{display:block;min-width:0;flex:1}
 .contact-name{display:block;font-size:13px;font-weight:600;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.pinned-marker{display:inline-block;margin-left:6px;color:#6a8b55;font-size:9px;vertical-align:1px}
 .translation-chip{display:inline-block;margin-left:6px;padding:2px 5px;border-radius:5px;background:#e5edda;color:#6a7e5b;font-size:8px;font-weight:650;vertical-align:1px}
 .contact-preview{display:block;color:#8a9385;font-size:11px;margin-top:5px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .contact-time{align-self:flex-start;margin-top:3px;font-size:9px;color:#919b89}
