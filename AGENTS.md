@@ -10,7 +10,7 @@
 
 ## Current state
 
-The implementation now includes a Baileys adapter, a browser chat, persistent messages/contacts, a subscription translation broker and private systemd deployment. The owner has paired WhatsApp and confirmed use; live database aggregates show received translations and read outgoing messages. Never describe fixture-based tests as a working WhatsApp exchange. Native chat discovery stores metadata separately from enabled translation contacts and now tracks recency, pins and archive. The first pairing skipped initial history; recovering the old sidebar order still needs fresh history. Never translate imported history or reset the paired session automatically. Any new pairing requires the owner's explicit participation and a private backup of the prior session. Read README.md and docs/ before continuing. Live access requires owner password even through the SSH-forwarded Unix socket; preserve the systemd credential and never print the initial password. See docs/security.md.
+The implementation now includes a Baileys adapter, a browser chat, persistent messages/contacts, a subscription translation broker and private systemd deployment. The owner has paired WhatsApp and confirmed use; live database aggregates show received translations and read outgoing messages. Never describe fixture-based tests as a working WhatsApp exchange. Native chat discovery stores metadata separately from enabled translation contacts and tracks recency, pins and archive. The owner-approved new pairing has now completed: 267 directory records, 94 timestamped conversations, connected in the authenticated browser on 18 September at 20:16 UTC. Do not repeat pairing; compare the resulting sidebar with the owner next. Never translate imported history or reset the paired session automatically. Read README.md and docs/ before continuing. Live access requires owner password even through the SSH-forwarded Unix socket; preserve the systemd credential and never print the initial password. See docs/security.md.
 
 Related private repository: alloben812/multimode-agents. Its documented Hetzner deployment contains isolated subscription runtimes. Inspect current code and server state before reusing them; do not assume a generic model API key or public inference endpoint exists.
 
@@ -18,7 +18,7 @@ The owner clarified that Hetzner is hosting for a standalone translator, not a d
 
 ## Development
 
-Current handoff: the owner explicitly approved re-pairing to recover initial sidebar history. The old auth directory and a consistent database copy are preserved root-only at `/var/lib/whatsapp-translator-backups/before-history-pairing-20260918T195157Z`. A fresh empty auth directory is ready; working database and password were preserved. Await owner login/QR scan, do not reset again. Check the live checkpoint for completion updates.
+Current handoff: paused at the owner's request until tomorrow; read `docs/resume-2026-09-19.md` first. New pairing and initial history reception succeeded. Keep the current session. The old auth directory and a consistent database copy remain root-only at `/var/lib/whatsapp-translator-backups/before-history-pairing-20260918T195157Z`. Next: restore the local SSH tunnel if needed, open the existing browser tab, guide login with the unchanged password if expired, then compare sidebar order. No new QR, reset, or deployment by default. Explain refresh timing and give the owner short steps.
 
 - Node.js 22.17+, TypeScript, node:sqlite; one service instance per database.
 - Install: npm ci --ignore-scripts.
