@@ -106,7 +106,7 @@ test('legacy database migration preserves messages and idempotency, adds persist
     assert.equal(migrated.insertOutgoing(contact.id, 'Привет', 'key-old').inserted, false);
     migrated.close();
     const reopened = new Store(path);
-    assert.deepEqual(reopened.contacts(), [contact]);
+    assert.deepEqual(reopened.contacts(), [{ ...contact, language: 'sr-Latn' }]);
     assert.equal(reopened.get('legacy')?.status, 'delivered');
     reopened.close();
   } finally { rmSync(directory, { recursive: true, force: true }); }

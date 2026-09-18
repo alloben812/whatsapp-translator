@@ -12,7 +12,7 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   const web = mkdtempSync(join(tmpdir(), 'wa-http-test-'));
   for (const file of ['index.html', 'app.js', 'styles.css']) writeFileSync(join(web, file), file);
   const store = new Store(':memory:');
-  let sends = 0; let ready = true;
+  let sends = 0; let ready = true; let transcriptions = 0;
   let phase: ConnectionState['phase'] = 'disconnected';
   const connection = {
     state: () => ({ phase, qr: null, account: null, errorCode: null }),
@@ -23,7 +23,12 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
     async send(_contact, _text, messageId) { sends++; return { messageId: messageId! }; },
   }, []);
   const app = createApplication({ store, service, connection, webDirectory: web, origin: 'http://127.0.0.1:8787',
-    password: 'private-owner-password', translatorStatus: () => ({ ready, label: 'Test fixture', reason: ready ? null : 'unavailable' }) });
+    password: 'private-owner-password', translatorStatus: () => ({ ready, label: 'Test fixture', reason: ready ? null : 'unavailable' }),
+    speechReady: () => true,
+    transcriber: { async transcribe(bytes, language) {
+      transcriptions++; assert.equal(language, 'ru'); assert.equal(bytes.toString(), 'audio fixture'); return 'Текст диктовки';
+    } },
+  });
   await new Promise<void>(accept => app.listen(0, '127.0.0.1', accept));
   t.after(async () => { app.closeAllConnections(); await new Promise<void>(accept => app.close(() => accept())); store.close(); rmSync(web, { recursive: true, force: true }); });
   const address = app.address(); assert.ok(address && typeof address === 'object');
@@ -44,7 +49,7 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
         accept(new Response(Buffer.concat(chunks), { status: res.statusCode!, headers }));
       });
     });
-    req.on('error', reject); req.end(data === undefined ? undefined : JSON.stringify(data));
+    req.on('error', reject); req.end(data === undefined ? undefined : Buffer.isBuffer(data) ? data : JSON.stringify(data));
   });
   assert.equal((await call('/api/state')).status, 401);
   assert.equal((await call('/api/login', { password: 'wrong' })).status, 401);
@@ -53,6 +58,18 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   session = login.headers.get('set-cookie')!.split(';')[0]!;
   assert.ok(login.headers.get('set-cookie')!.includes('HttpOnly'));
   const state = await (await call('/api/state')).json(); csrf = state.csrfToken;
+  assert.ok(state.languages.some((language: { code: string }) => language.code === 'de'));
+  assert.equal(state.speech.ready, true);
+  const audio = Buffer.from('audio fixture');
+  assert.equal((await call('/api/transcribe', audio, { 'Content-Type': 'audio/webm', 'X-CSRF-Token': 'wrong' })).status, 403);
+  assert.equal((await call('/api/transcribe', audio)).status, 400);
+  assert.equal((await call('/api/transcribe', Buffer.alloc(0), { 'Content-Type': 'audio/webm' })).status, 400);
+  assert.equal(transcriptions, 0);
+  const transcript = await call('/api/transcribe', audio, { 'Content-Type': 'audio/webm;codecs=opus' });
+  assert.deepEqual(await transcript.json(), { text: 'Текст диктовки' });
+  assert.equal(transcriptions, 1);
+  assert.equal(sends, 0);
+  assert.equal(store.list().length, 0);
   assert.equal((await call('/api/state', undefined, { Origin: 'https://evil.example' })).status, 403);
   assert.equal((await call('/api/state', undefined, { Host: 'evil.example' })).status, 403);
   assert.equal((await call('/api/connect', {}, { 'X-CSRF-Token': 'wrong' })).status, 403);
@@ -61,6 +78,11 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   const contactResponse = await call('/api/contacts', { name: 'Марко', phone: '+381600000001' });
   assert.equal(contactResponse.status, 201);
   const contact = await contactResponse.json();
+  assert.equal(contact.language, 'sr-Latn');
+  assert.equal((await call('/api/contact-language', { contactId: contact.id, language: 'invented' })).status, 400);
+  assert.equal((await call('/api/contact-language', { contactId: contact.id, language: 'de' }, { 'X-CSRF-Token': 'wrong' })).status, 403);
+  assert.equal((await call('/api/contact-language', { contactId: contact.id, language: 'de' })).status, 200);
+  assert.equal(store.contacts().find(item => item.id === contact.id)?.language, 'de');
   const saveContact = store.saveContact.bind(store);
   store.saveContact = () => { throw new Error('Simulated disk failure'); };
   assert.equal((await call('/api/contacts', { name: 'Ана', phone: '+381600000002' })).status, 500);
@@ -70,9 +92,12 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   const first = await (await call('/api/send', outgoing)).json();
   assert.equal(first.status, 'sent');
   assert.equal(first.translatedText, 'Zdravo!');
+  assert.equal(first.targetLanguage, 'de');
+  assert.equal((await call('/api/contact-language', { contactId: contact.id, language: 'fr' })).status, 200);
   phase = 'disconnected'; ready = false;
   const repeat = await (await call('/api/send', outgoing)).json();
   assert.equal(first.id, repeat.id);
+  assert.equal(repeat.targetLanguage, 'de');
   assert.equal(sends, 1);
   assert.equal((await call('/api/send', { ...outgoing, text: 'Другой текст' })).status, 400);
   assert.equal((await call('/api/send', { ...outgoing, idempotencyKey: 'new-key' })).status, 400);

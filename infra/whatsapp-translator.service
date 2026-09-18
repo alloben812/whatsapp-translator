@@ -1,5 +1,5 @@
 [Unit]
-Description=Personal WhatsApp Russian-Serbian translator
+Description=Personal WhatsApp translator with local voice input
 After=network-online.target whatsapp-translator-broker.socket
 Wants=network-online.target whatsapp-translator-broker.socket
 
@@ -29,7 +29,9 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ReadWritePaths=/var/lib/whatsapp-translator /run/whatsapp-translator
-MemoryMax=600M
+# Includes the bounded local Whisper small/int8 subprocess.
+MemoryMax=1900M
+CPUQuota=175%
 TasksMax=80
 # Transitive WhatsApp cryptography code can print session material directly.
 # Owner-visible error codes live in /api/state; raw stdout/stderr never enter journal.

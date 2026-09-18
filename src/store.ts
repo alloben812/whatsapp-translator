@@ -3,6 +3,10 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { ServiceError, type Contact, type Message, type MessageStatus } from './domain.js';
+import {
+  DEFAULT_CONTACT_LANGUAGE, isContactLanguage, isTranslationLanguages, translationLanguages,
+  type ContactLanguageCode, type LanguageCode, type TranslationLanguages,
+} from './languages.js';
 
 interface MessageRow {
   id: string;
@@ -15,6 +19,8 @@ interface MessageRow {
   idempotency_key: string | null;
   created_at: string;
   error_code: string | null;
+  source_language: LanguageCode;
+  target_language: LanguageCode;
 }
 
 interface InsertResult {
@@ -36,6 +42,8 @@ function fromRow(row: MessageRow): Message {
     idempotencyKey: row.idempotency_key,
     createdAt: row.created_at,
     errorCode: row.error_code,
+    sourceLanguage: row.source_language,
+    targetLanguage: row.target_language,
   };
 }
 
@@ -81,6 +89,28 @@ export class Store {
       UPDATE messages SET status = 'unknown', error_code = 'uncertain_delivery'
         WHERE status = 'sending';
     `);
+    this.migrateLanguages();
+  }
+
+  private migrateLanguages(): void {
+    // Assign original Serbian defaults only to rows that predate this feature.
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const contactColumns = this.database.prepare('PRAGMA table_info(contacts)').all().map(row => row.name);
+      if (!contactColumns.includes('language')) {
+        this.database.exec("ALTER TABLE contacts ADD COLUMN language TEXT NOT NULL DEFAULT 'sr-Latn'");
+      }
+      const messageColumns = this.database.prepare('PRAGMA table_info(messages)').all().map(row => row.name);
+      if (!messageColumns.includes('source_language')) {
+        this.database.exec("ALTER TABLE messages ADD COLUMN source_language TEXT NOT NULL DEFAULT 'ru'");
+        this.database.exec("UPDATE messages SET source_language='sr-Latn' WHERE direction='incoming'");
+      }
+      if (!messageColumns.includes('target_language')) {
+        this.database.exec("ALTER TABLE messages ADD COLUMN target_language TEXT NOT NULL DEFAULT 'sr-Latn'");
+        this.database.exec("UPDATE messages SET target_language='ru' WHERE direction='incoming'");
+      }
+      this.database.exec('COMMIT');
+    } catch (error) { this.database.exec('ROLLBACK'); this.database.close(); throw error; }
   }
 
   close(): void {
@@ -94,13 +124,25 @@ export class Store {
   }
 
   contacts(): Contact[] {
-    return this.database.prepare('SELECT id, name FROM contacts ORDER BY name, id').all()
-      .map(row => ({ id: String(row.id), name: String(row.name) }));
+    return this.database.prepare('SELECT id, name, language FROM contacts ORDER BY name, id').all()
+      .map(row => ({ id: String(row.id), name: String(row.name), language: String(row.language) as ContactLanguageCode }));
   }
 
   saveContact(contact: Contact): Contact {
-    this.database.prepare('INSERT INTO contacts VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name').run(contact.id, contact.name);
-    return contact;
+    const existing = this.database.prepare('SELECT language FROM contacts WHERE id=?').get(contact.id);
+    const language = contact.language ?? existing?.language ?? DEFAULT_CONTACT_LANGUAGE;
+    if (!isContactLanguage(language)) throw new ServiceError('invalid_language', 'Unsupported contact language.');
+    this.database.prepare('INSERT INTO contacts(id,name,language) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, language=excluded.language')
+      .run(contact.id, contact.name, language);
+    return { ...contact, language };
+  }
+
+  setContactLanguage(contactId: string, language: ContactLanguageCode): Contact {
+    if (!isContactLanguage(language)) throw new ServiceError('invalid_language', 'Unsupported contact language.');
+    const result = this.database.prepare('UPDATE contacts SET language=? WHERE id=?').run(language, contactId);
+    if (!result.changes) throw new ServiceError('unknown_contact', 'The selected contact is not allowed.');
+    const row = this.database.prepare('SELECT id, name FROM contacts WHERE id=?').get(contactId)!;
+    return { id: String(row.id), name: String(row.name), language };
   }
 
   byRequestKey(key: string): Message | undefined {
@@ -122,13 +164,19 @@ export class Store {
     return row ? fromRow(row) : undefined;
   }
 
-  insertOutgoing(contactId: string, text: string, idempotencyKey: string): InsertResult {
+  insertOutgoing(
+    contactId: string, text: string, idempotencyKey: string,
+    languages: TranslationLanguages = translationLanguages('outgoing'),
+  ): InsertResult {
+    if (!isTranslationLanguages(languages) || languages.sourceLanguage !== 'ru') {
+      throw new ServiceError('invalid_language', 'Invalid outgoing translation languages.');
+    }
     const result = this.database.prepare(`
       INSERT INTO messages (
-        id, direction, contact_id, original_text, status, idempotency_key, created_at
-      ) VALUES (?, 'outgoing', ?, ?, 'translating', ?, ?)
+        id, direction, contact_id, original_text, status, idempotency_key, created_at, source_language, target_language
+      ) VALUES (?, 'outgoing', ?, ?, 'translating', ?, ?, ?, ?)
       ON CONFLICT(idempotency_key) DO NOTHING
-    `).run(randomUUID(), contactId, text, idempotencyKey, new Date().toISOString());
+    `).run(randomUUID(), contactId, text, idempotencyKey, new Date().toISOString(), languages.sourceLanguage, languages.targetLanguage);
     const row = this.database.prepare('SELECT * FROM messages WHERE idempotency_key = ?')
       .get(idempotencyKey) as unknown as MessageRow;
     const message = fromRow(row);
@@ -138,13 +186,19 @@ export class Store {
     return { message, inserted: Number(result.changes) === 1 };
   }
 
-  insertIncoming(contactId: string, text: string, remoteId: string): InsertResult {
+  insertIncoming(
+    contactId: string, text: string, remoteId: string,
+    languages: TranslationLanguages = translationLanguages('incoming'),
+  ): InsertResult {
+    if (!isTranslationLanguages(languages) || languages.targetLanguage !== 'ru') {
+      throw new ServiceError('invalid_language', 'Invalid incoming translation languages.');
+    }
     const result = this.database.prepare(`
       INSERT INTO messages (
-        id, direction, contact_id, original_text, status, remote_id, created_at
-      ) VALUES (?, 'incoming', ?, ?, 'translating', ?, ?)
+        id, direction, contact_id, original_text, status, remote_id, created_at, source_language, target_language
+      ) VALUES (?, 'incoming', ?, ?, 'translating', ?, ?, ?, ?)
       ON CONFLICT(contact_id, remote_id) WHERE direction = 'incoming' DO NOTHING
-    `).run(randomUUID(), contactId, text, remoteId, new Date().toISOString());
+    `).run(randomUUID(), contactId, text, remoteId, new Date().toISOString(), languages.sourceLanguage, languages.targetLanguage);
     const row = this.database.prepare(`
       SELECT * FROM messages WHERE direction = 'incoming' AND contact_id = ? AND remote_id = ?
     `).get(contactId, remoteId) as unknown as MessageRow;

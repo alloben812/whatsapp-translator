@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { test, type TestContext } from 'node:test';
 import { ServiceError } from '../src/domain.js';
 import { CommandTranslator, createTranslator } from '../src/translator.js';
+import type { TranslationLanguages } from '../src/languages.js';
 
 function fixture(t: TestContext, script: string) {
   const path = mkdtempSync(join(tmpdir(), 'watr-translator-test-'));
@@ -180,4 +181,25 @@ test('factory is unavailable until an operator configures the broker', async () 
   assert.throws(() => new CommandTranslator({ command: 'sh -c pretend' }), { code: 'invalid_translator_config' });
   assert.throws(() => new CommandTranslator({ command: process.execPath, maxQueue: -1 }), { code: 'invalid_translator_config' });
   assert.throws(() => new CommandTranslator({ command: process.execPath, timeoutMs: Infinity }), { code: 'invalid_translator_config' });
+});
+
+test('explicit language wire contains only validated languages and text, legacy directions stay compatible', async (t) => {
+  const translator = new CommandTranslator(fixture(t, [
+    'let input=""; process.stdin.on("data", chunk => input += chunk);',
+    'process.stdin.on("end", () => process.stdout.write(JSON.stringify({translation:JSON.stringify(JSON.parse(input))})));',
+  ].join('\n')));
+  assert.deepEqual(JSON.parse(await translator.translate('Привет', 'ru-sr', {
+    sourceLanguage: 'ru', targetLanguage: 'en',
+  })), { text: 'Привет', sourceLanguage: 'ru', targetLanguage: 'en' });
+  assert.deepEqual(JSON.parse(await translator.translate('Guten Tag', 'sr-ru', {
+    sourceLanguage: 'de', targetLanguage: 'ru',
+  })), { text: 'Guten Tag', sourceLanguage: 'de', targetLanguage: 'ru' });
+  for (const pair of [
+    { sourceLanguage: 'en', targetLanguage: 'de' },
+    { sourceLanguage: 'ru', targetLanguage: 'ru' },
+    { sourceLanguage: 'ru', targetLanguage: 'unknown' },
+    { sourceLanguage: 'de', targetLanguage: 'ru' },
+  ]) {
+    await assert.rejects(translator.translate('Привет', 'ru-sr', pair as TranslationLanguages), hasCode('invalid_input'));
+  }
 });

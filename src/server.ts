@@ -6,6 +6,7 @@ import { TranslationService } from './service.js';
 import { WhatsAppConnection } from './whatsapp.js';
 import { CommandTranslator, createTranslator } from './translator.js';
 import { createApplication, type TranslatorStatus } from './http-app.js';
+import { CommandTranscriber, createTranscriber } from './transcription.js';
 
 process.umask(0o077);
 
@@ -40,6 +41,17 @@ async function main(): Promise<void> {
     ...(process.env.WA_TRANSLATOR_COMMAND ? { command: process.env.WA_TRANSLATOR_COMMAND } : {}),
     args, timeoutMs: 75_000, maxQueue: 8,
   });
+  const speech = createTranscriber({
+    ...(process.env.WA_STT_PYTHON ? { command: process.env.WA_STT_PYTHON } : {}),
+    script: join(root, 'scripts', 'transcribe.py'),
+    ...(process.env.WA_STT_MODEL ? { modelDir: process.env.WA_STT_MODEL } : {}),
+    maxAudioBytes: 8 * 1024 * 1024, maxDurationSeconds: 60,
+    maxQueue: 0, timeoutMs: 70_000, cpuThreads: 2, beamSize: 3,
+  });
+  let speechReady = false;
+  const checkSpeech = async () => {
+    if (speech.transcriber instanceof CommandTranscriber) speechReady = (await speech.transcriber.probe()).ready;
+  };
   let readiness: TranslatorStatus = { ready: false, label: 'Claude Sonnet', reason: 'unconfigured' };
   let checking = false;
   const refresh = async () => {
@@ -64,6 +76,7 @@ async function main(): Promise<void> {
   service = new TranslationService(store, translation.translator, connection, store.contacts());
   const server = createApplication({
     store, service, connection, translatorStatus: () => readiness, webDirectory: join(root, 'web'), origin,
+    transcriber: speech.transcriber, speechReady: () => speechReady,
     ...(process.env.WA_PASSWORD ? { password: process.env.WA_PASSWORD } : {}),
   });
   await new Promise<void>((accept, reject) => {
@@ -73,6 +86,7 @@ async function main(): Promise<void> {
   });
   if (socketPath) chmodSync(socketPath, 0o660);
   void refresh();
+  void checkSpeech();
   const timer = setInterval(() => { void refresh(); }, 30_000);
   timer.unref();
   // A new installation stays disconnected until the owner asks for a QR.

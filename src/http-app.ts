@@ -6,6 +6,8 @@ import QRCode from 'qrcode';
 import { isIndividualContactId, ServiceError, type Contact, type SendRequest } from './domain.js';
 import { TranslationService } from './service.js';
 import { Store } from './store.js';
+import { CONTACT_LANGUAGES, DEFAULT_CONTACT_LANGUAGE, isContactLanguage } from './languages.js';
+import type { Transcriber } from './transcription.js';
 
 export interface ConnectionState {
   phase: 'disconnected' | 'connecting' | 'qr' | 'connected' | 'logged_out' | 'error';
@@ -24,6 +26,8 @@ export interface ApplicationOptions {
   service: TranslationService;
   connection: LiveConnection;
   translatorStatus: () => TranslatorStatus;
+  transcriber?: Transcriber;
+  speechReady?: () => boolean;
   webDirectory: string;
   origin: string;
   password?: string;
@@ -34,6 +38,13 @@ const messages: Record<string, string> = {
   invalid_input: 'Проверьте номер, имя и текст сообщения.',
   unknown_contact: 'Сначала выберите добавленного собеседника.',
   invalid_contact: 'Нужен номер личного WhatsApp с кодом страны.',
+  invalid_language: 'Выберите язык собеседника из списка.',
+  invalid_audio: 'Нужна запись голоса до 60 секунд и 8 МБ.',
+  transcription_busy: 'Предыдущая запись ещё распознаётся. Дождитесь результата.',
+  transcription_timeout: 'Не удалось распознать запись вовремя. Попробуйте более короткую фразу.',
+  transcription_unavailable: 'Распознавание речи временно недоступно. Можно ввести текст вручную.',
+  invalid_transcription: 'Не удалось разобрать речь. Повторите запись или введите текст.',
+  transcription_output_limit: 'Результат распознавания слишком большой. Запишите более короткую фразу.',
   contact_not_found: 'Этот номер не найден в WhatsApp. Проверьте код страны и номер.',
   whatsapp_unavailable: 'Подключите WhatsApp и дождитесь соединения.',
   translator_unavailable: 'Переводчик пока недоступен. Сообщение не отправлено.',
@@ -62,6 +73,21 @@ async function body(request: IncomingMessage): Promise<unknown> {
   }
   try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))); }
   catch { return fail('invalid_input'); }
+}
+async function audioBody(request: IncomingMessage): Promise<Buffer> {
+  const mime = request.headers['content-type']?.split(';')[0]?.trim().toLowerCase();
+  if (!mime || !['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'].includes(mime)) fail('invalid_audio');
+  const maximum = 8 * 1024 * 1024;
+  const length = request.headers['content-length'];
+  if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > maximum)) fail('invalid_audio');
+  const chunks: Buffer[] = []; let bytes = 0;
+  for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > maximum) fail('invalid_audio');
+    chunks.push(Buffer.from(chunk));
+  }
+  if (!bytes) fail('invalid_audio');
+  return Buffer.concat(chunks);
 }
 function cookie(request: IncomingMessage): string | undefined {
   return request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith('wa_session='))?.slice(11);
@@ -135,28 +161,48 @@ export function createApplication(options: ApplicationOptions) {
         send(response, 200, {
           mode: options.mode ?? 'live', csrfToken: session.csrf,
           whatsapp: { phase: state.phase, qrDataUrl: qrCache?.dataUrl ?? null, account: state.account, errorCode: state.errorCode },
-          translator: options.translatorStatus(), contacts: options.store.contacts(), messages: recent,
+          translator: options.translatorStatus(), languages: CONTACT_LANGUAGES,
+          speech: { ready: Boolean(options.transcriber && options.speechReady?.()), language: 'ru', maxSeconds: 60 },
+          contacts: options.store.contacts(), messages: recent,
         }); return;
       }
       if (request.method !== 'POST') fail('not_found');
       if (request.headers['x-csrf-token'] !== session.csrf) fail('forbidden');
+      if (path === '/api/transcribe') {
+        if (!options.transcriber || !options.speechReady?.()) fail('transcription_unavailable');
+        const audio = await audioBody(request);
+        const text = await options.transcriber.transcribe(audio, 'ru');
+        send(response, 200, { text }); return;
+      }
       const input = await body(request);
       if (path === '/api/connect') {
         exact(input, []); await options.connection.connect(); send(response, 202, { ok: true }); return;
       }
       if (path === '/api/contacts') {
-        const value = exact(input, ['name', 'phone']);
+        const hasLanguage = input !== null && typeof input === 'object' && 'language' in input;
+        const value = exact(input, hasLanguage ? ['name', 'phone', 'language'] : ['name', 'phone']);
+        const language = hasLanguage ? value.language : DEFAULT_CONTACT_LANGUAGE;
+        if (!isContactLanguage(language)) fail('invalid_language');
         if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 100 ||
             typeof value.phone !== 'string' || !/^\+?[1-9]\d{6,14}$/.test(value.phone)) fail('invalid_input');
         if (options.connection.state().phase !== 'connected') fail('whatsapp_unavailable');
         if (options.store.contacts().length >= 100) fail('invalid_input');
         const found = await options.connection.resolveContact(value.phone.replace(/^\+/, ''));
         if (!found) fail('contact_not_found');
-        const contact: Contact = { id: found.id, name: value.name.trim() };
+        const contact: Contact = { id: found.id, name: value.name.trim(), language };
         if (!isIndividualContactId(contact.id)) fail('invalid_contact');
         options.store.saveContact(contact);
         options.service.setContacts(options.store.contacts());
         send(response, 201, contact); return;
+      }
+      if (path === '/api/contact-language') {
+        const value = exact(input, ['contactId', 'language']);
+        if (typeof value.contactId !== 'string') fail('invalid_input');
+        if (!isContactLanguage(value.language)) fail('invalid_language');
+        if (!options.store.contacts().some(contact => contact.id === value.contactId)) fail('unknown_contact');
+        const contact = options.store.setContactLanguage(value.contactId, value.language);
+        options.service.setContacts(options.store.contacts());
+        send(response, 200, contact); return;
       }
       if (path === '/api/send') {
         const value = exact(input, ['contactId', 'text', 'idempotencyKey']);
@@ -177,7 +223,9 @@ export function createApplication(options: ApplicationOptions) {
       fail('not_found');
     })().catch((error: unknown) => {
       const code = error instanceof ServiceError && error.code in messages ? error.code : 'request_failed';
-      const status = code === 'unauthorized' ? 401 : code === 'forbidden' ? 403 : code === 'not_found' ? 404 : code === 'rate_limited' ? 429 : code === 'request_failed' ? 500 : 400;
+      const status = code === 'unauthorized' ? 401 : code === 'forbidden' ? 403 : code === 'not_found' ? 404 : code === 'rate_limited' ? 429
+        : code === 'transcription_busy' ? 409 : code === 'transcription_timeout' ? 504 : code === 'transcription_unavailable' ? 503
+          : code === 'request_failed' ? 500 : 400;
       send(response, status, { error: { code, message: messages[code] } });
     });
   });

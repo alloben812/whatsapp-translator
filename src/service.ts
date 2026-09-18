@@ -11,6 +11,9 @@ import {
 } from './domain.js';
 import { Store } from './store.js';
 import { randomBytes } from 'node:crypto';
+import {
+  DEFAULT_CONTACT_LANGUAGE, isContactLanguage, translationLanguages, type ContactLanguageCode,
+} from './languages.js';
 
 function validateText(text: string, maximumLength: number, label: string): void {
   if (typeof text !== 'string' || text.trim().length === 0 || text.length > maximumLength) {
@@ -20,7 +23,7 @@ function validateText(text: string, maximumLength: number, label: string): void 
 
 /** Single process / instance. Only explicit send() calls can reach the transport. */
 export class TranslationService {
-  private contacts: ReadonlySet<string> = new Set();
+  private contacts: ReadonlyMap<string, ContactLanguageCode> = new Map();
 
   constructor(
     private readonly store: Store,
@@ -32,12 +35,14 @@ export class TranslationService {
   }
 
   setContacts(contacts: Contact[]): void {
-    const ids = new Set<string>();
+    const ids = new Map<string, ContactLanguageCode>();
     for (const contact of contacts) {
       if (!isIndividualContactId(contact.id) || ids.has(contact.id)) {
         throw new ServiceError('invalid_contact', 'Contacts must have unique individual WhatsApp IDs.');
       }
-      ids.add(contact.id);
+      const language = contact.language ?? DEFAULT_CONTACT_LANGUAGE;
+      if (!isContactLanguage(language)) throw new ServiceError('invalid_language', 'Unsupported contact language.');
+      ids.set(contact.id, language);
     }
     this.contacts = ids;
   }
@@ -56,6 +61,7 @@ export class TranslationService {
     // Reserve the key synchronously before any asynchronous work.
     const { message, inserted } = this.store.insertOutgoing(
       request.contactId, request.text, request.idempotencyKey,
+      translationLanguages('outgoing', this.contacts.get(request.contactId)!),
     );
     if (!inserted) return message;
 
@@ -98,7 +104,8 @@ export class TranslationService {
     if (event.fromMe || event.isHistory || !this.contacts.has(event.contactId)) return null;
     validateText(event.text, 4000, 'Text');
     validateText(event.id, 256, 'Remote message ID');
-    const { message, inserted } = this.store.insertIncoming(event.contactId, event.text, event.id);
+    const { message, inserted } = this.store.insertIncoming(event.contactId, event.text, event.id,
+      translationLanguages('incoming', this.contacts.get(event.contactId)!));
     if (!inserted) return message;
     const translated = await this.translate(message, 'sr-ru');
     if (translated.status === 'failed') return translated;
@@ -108,7 +115,9 @@ export class TranslationService {
   private async translate(message: Message, direction: TranslationDirection): Promise<Message> {
     let text: string;
     try {
-      text = await this.translator.translate(message.originalText, direction);
+      text = await this.translator.translate(message.originalText, direction, {
+        sourceLanguage: message.sourceLanguage, targetLanguage: message.targetLanguage,
+      });
     } catch {
       // Provider error text may contain credentials or private content; don't persist it.
       return this.store.setState(message.id, 'failed', { errorCode: 'translation_failed' });

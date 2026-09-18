@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -98,6 +99,39 @@ class BrokerTest(unittest.TestCase):
         runtime, broker = self.new()
         broker.translate({'text': 'Zdravo!', 'direction': 'sr-ru'})
         self.assertIn('into Russian.', runtime.job['task'])
+
+    def test_explicit_language_pair_controls_prompt_and_serbian_script(self):
+        for source, target, expected in (
+            ('ru', 'en', 'from Russian into English.'),
+            ('uk', 'ru', 'from Ukrainian into Russian.'),
+            ('ru', 'sr-Cyrl', 'from Russian into Serbian in cyrillic script.'),
+        ):
+            runtime, broker = self.new()
+            broker.translate({'text': 'Сообщение', 'sourceLanguage': source, 'targetLanguage': target})
+            self.assertIn(expected, runtime.job['task'])
+            self.assertEqual(runtime.calls.count('start'), 1)
+
+    def test_invalid_or_ambiguous_language_pair_fails_before_any_external_action(self):
+        for request in (
+            {'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': 'ru'},
+            {'text': 'Привет', 'sourceLanguage': 'en', 'targetLanguage': 'de'},
+            {'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': 'unknown'},
+            {'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': []},
+            {'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': 'en', 'direction': 'ru-sr'},
+        ):
+            runtime, broker = self.new()
+            with self.assertRaises(bridge.Rejected):
+                broker.translate(request)
+            self.assertEqual(runtime.calls, [])
+
+    def test_every_application_language_is_supported_by_the_broker(self):
+        catalog = (Path(__file__).parents[1] / 'src/languages.ts').read_text()
+        codes = set(re.findall(r"code: '([^']+)'", catalog))
+        self.assertEqual(codes | {'ru'}, set(bridge.LANGUAGES))
+        for code in codes:
+            runtime, broker = self.new()
+            broker.translate({'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': code})
+            self.assertIn('into ' + bridge.LANGUAGES[code] + '.', runtime.job['task'])
 
     def test_explicit_codex_keeps_low_effort_without_model_fallback(self):
         runtime, broker = self.new()

@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import { ServiceError, type TranslationDirection, type Translator } from './domain.js';
+import { isTranslationLanguages, type TranslationLanguages } from './languages.js';
 
 export interface CommandTranslatorOptions {
   /** An operator-owned broker executable, never message content or a shell expression. */
@@ -118,11 +119,16 @@ export class CommandTranslator implements Translator {
     this.args = [...args];
   }
 
-  async translate(text: string, direction: TranslationDirection): Promise<string> {
+  async translate(text: string, direction: TranslationDirection, languages?: TranslationLanguages): Promise<string> {
     if (typeof text !== 'string' || !text.trim() || text.length > 4000
       || (direction !== 'ru-sr' && direction !== 'sr-ru')) throw failure('invalid_input');
+    if (languages !== undefined && (!isTranslationLanguages(languages)
+      || (direction === 'ru-sr' ? languages.sourceLanguage !== 'ru' : languages.targetLanguage !== 'ru'))) {
+      throw failure('invalid_input');
+    }
+    const request = languages === undefined ? { text, direction } : { text, ...languages };
     const result = object(await inLane(
-      () => this.execute(this.args, JSON.stringify({ text, direction }) + '\n', this.timeoutMs),
+      () => this.execute(this.args, JSON.stringify(request) + '\n', this.timeoutMs),
       this.maxQueue, this.timeoutMs,
     ));
     if (Object.keys(result).length !== 1 || typeof result.translation !== 'string'

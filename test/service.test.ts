@@ -7,6 +7,7 @@ import type { Translator, Transport } from '../src/domain.js';
 import { ServiceError } from '../src/domain.js';
 import { TranslationService } from '../src/service.js';
 import { Store } from '../src/store.js';
+import type { TranslationLanguages } from '../src/languages.js';
 
 const contact = { id: '381600000001@s.whatsapp.net', name: 'Марко' };
 const secondContact = { id: '381600000002@s.whatsapp.net', name: 'Ана' };
@@ -200,4 +201,79 @@ test('restart recovers interrupted work and preserves dedupe without automatic s
   assert.equal(sends, 0);
   assert.equal(translations, 0);
   if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test('selected contact language is snapshotted before translation, changes apply only to new requests', async (t) => {
+  const store = new Store(':memory:');
+  t.after(() => store.close());
+  store.saveContact({ ...contact, language: 'en' });
+  const pairs: TranslationLanguages[] = [];
+  const sends: string[] = [];
+  let finish!: (text: string) => void;
+  const service = new TranslationService(store, {
+    async translate(_text, _direction, languages) {
+      assert.ok(languages);
+      pairs.push(languages);
+      if (pairs.length === 1) {
+        assert.equal(store.byRequestKey(request.idempotencyKey)?.targetLanguage, 'en');
+        return new Promise<string>(resolve => { finish = resolve; });
+      }
+      return languages.targetLanguage === 'ru' ? 'Ответ' : 'Translated text';
+    },
+  }, { async send(contactId) { sends.push(contactId); return { messageId: 'sent-' + sends.length }; } }, store.contacts());
+
+  const pending = service.send(request);
+  store.setContactLanguage(contact.id, 'de');
+  service.setContacts(store.contacts());
+  const duplicate = await service.send(request);
+  assert.equal(duplicate.targetLanguage, 'en');
+  assert.equal(duplicate.status, 'translating');
+  finish('May I come tomorrow at three?');
+  const first = await pending;
+  assert.equal(first.targetLanguage, 'en');
+  assert.deepEqual(await service.send(request), first);
+  const second = await service.send({ ...request, idempotencyKey: 'new-language-request' });
+  assert.equal(second.targetLanguage, 'de');
+  const incoming = await service.receive({ id: 'german-reply', contactId: contact.id, text: 'Ja, morgen.' });
+  assert.equal(incoming?.sourceLanguage, 'de');
+  assert.equal(incoming?.targetLanguage, 'ru');
+  assert.deepEqual(pairs, [
+    { sourceLanguage: 'ru', targetLanguage: 'en' },
+    { sourceLanguage: 'ru', targetLanguage: 'de' },
+    { sourceLanguage: 'de', targetLanguage: 'ru' },
+  ]);
+  assert.deepEqual(sends, [contact.id, contact.id]);
+});
+
+test('incoming retry keeps original language after contact edit and never sends a reply', async (t) => {
+  const store = new Store(':memory:');
+  t.after(() => store.close());
+  store.saveContact({ ...contact, language: 'en' });
+  const pairs: TranslationLanguages[] = [];
+  let sends = 0;
+  const service = new TranslationService(store, {
+    async translate(_text, _direction, languages) {
+      assert.ok(languages);
+      pairs.push(languages);
+      if (pairs.length === 1) throw new Error('Provider unavailable');
+      return 'Да, завтра.';
+    },
+  }, { async send() { sends++; return { messageId: 'must-not-send' }; } }, store.contacts());
+  const incoming = { id: 'english-reply', contactId: contact.id, text: 'Yes, tomorrow.' };
+  const first = await service.receive(incoming);
+  assert.equal(first?.status, 'failed');
+  store.setContactLanguage(contact.id, 'ja');
+  service.setContacts(store.contacts());
+  const retried = await service.retryIncoming(first!.id);
+  assert.equal(retried.sourceLanguage, 'en');
+  assert.equal(retried.targetLanguage, 'ru');
+  assert.equal(retried.status, 'received');
+  assert.deepEqual(await service.receive(incoming), retried);
+  await service.receive({ id: 'japanese-reply', contactId: contact.id, text: 'はい。' });
+  assert.deepEqual(pairs, [
+    { sourceLanguage: 'en', targetLanguage: 'ru' },
+    { sourceLanguage: 'en', targetLanguage: 'ru' },
+    { sourceLanguage: 'ja', targetLanguage: 'ru' },
+  ]);
+  assert.equal(sends, 0);
 });

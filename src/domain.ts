@@ -1,7 +1,10 @@
+import type { ContactLanguageCode, LanguageCode, TranslationLanguages } from './languages.js';
+
+/** Compatibility direction for existing adapters; explicit languages take precedence. */
 export type TranslationDirection = 'ru-sr' | 'sr-ru';
 
 export interface Translator {
-  translate(text: string, direction: TranslationDirection): Promise<string>;
+  translate(text: string, direction: TranslationDirection, languages?: TranslationLanguages): Promise<string>;
 }
 
 export interface Transport {
@@ -11,6 +14,7 @@ export interface Transport {
 export interface Contact {
   id: string;
   name: string;
+  language?: ContactLanguageCode;
 }
 
 export type MessageStatus =
@@ -34,6 +38,8 @@ export interface Message {
   idempotencyKey: string | null;
   createdAt: string;
   errorCode: string | null;
+  sourceLanguage: LanguageCode;
+  targetLanguage: LanguageCode;
 }
 
 export interface SendRequest {

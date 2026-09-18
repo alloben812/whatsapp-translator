@@ -34,6 +34,23 @@ WA_TRANSLATOR_LABEL=Claude Sonnet
 ENV
   )
 fi
+if [[ -x /opt/whatsapp-translator/stt-venv/bin/python && -f /opt/whatsapp-translator/models/faster-whisper-small/model.bin ]]; then
+  # Add optional local speech configuration without changing existing operator choices.
+  python3 - <<'PY'
+from pathlib import Path
+path = Path('/etc/whatsapp-translator/application.env')
+content = path.read_text()
+present = {line.split('=', 1)[0] for line in content.splitlines() if '=' in line}
+for key, value in {
+    'WA_STT_PYTHON': '/opt/whatsapp-translator/stt-venv/bin/python',
+    'WA_STT_MODEL': '/opt/whatsapp-translator/models/faster-whisper-small',
+}.items():
+    if key not in present:
+        content = content.rstrip() + '\n' + key + '=' + value + '\n'
+path.write_text(content)
+path.chmod(0o600)
+PY
+fi
 install -o root -g root -m 0755 "$release/infra/whatsapp-translation-socket.sh" /usr/local/sbin/whatsapp-translation-socket
 for unit in whatsapp-translator.service whatsapp-translator-broker.socket whatsapp-translator-broker@.service; do
   install -o root -g root -m 0644 "$release/infra/$unit" "/etc/systemd/system/$unit"
