@@ -15,6 +15,7 @@ if ! id whatsapp-translator >/dev/null 2>&1; then
 fi
 install -d -o root -g root -m 0700 /etc/whatsapp-translator
 install -d -o whatsapp-translator -g whatsapp-translator -m 0700 /var/lib/whatsapp-translator
+/usr/bin/python3 -I "$release/scripts/provision-owner-password.py"
 # Administrative SSH only; model runtime users do not join this group.
 usermod -a -G whatsapp-translator mma
 if [[ ! -e /etc/whatsapp-translator/translator.json ]]; then

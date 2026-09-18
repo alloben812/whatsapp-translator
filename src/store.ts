@@ -8,6 +8,8 @@ import {
   type ContactLanguageCode, type LanguageCode, type TranslationLanguages,
 } from './languages.js';
 
+const MAX_DISCOVERED_CHATS = 10_000;
+
 interface MessageRow {
   id: string;
   direction: Message['direction'];
@@ -132,6 +134,8 @@ export class Store {
   }
 
   saveDiscoveredChats(chats: DiscoveredChat[]): void {
+    const exists = this.database.prepare('SELECT 1 FROM discovered_chats WHERE id=?');
+    const count = this.database.prepare('SELECT COUNT(*) AS count FROM discovered_chats');
     const save = this.database.prepare(`INSERT INTO discovered_chats(id,name,last_message_at,preview) VALUES(?,?,?,?)
       ON CONFLICT(id) DO UPDATE SET
         name=COALESCE(excluded.name,discovered_chats.name),
@@ -149,6 +153,11 @@ export class Store {
         const timestamp = chat.lastMessageAt && Number.isFinite(Date.parse(chat.lastMessageAt))
           ? new Date(chat.lastMessageAt).toISOString() : null;
         const preview = timestamp && typeof chat.preview === 'string' ? chat.preview.slice(0, 240) : null;
+        const known = Boolean(exists.get(chat.id));
+        if (!known) {
+          const row = count.get() as { count: number };
+          if (row.count >= MAX_DISCOVERED_CHATS) continue;
+        }
         save.run(chat.id, name, timestamp, preview);
       }
       this.database.exec('COMMIT');

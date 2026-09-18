@@ -23,6 +23,7 @@ p,h1,h2{margin:0}
 .language-route{font-weight:550;white-space:nowrap}
 .language-route span{margin:0 10px;color:#8c9a82}
 .connection-status{display:flex;align-items:center;gap:8px;color:#6e7b70;white-space:nowrap;font-size:11px}
+.header-logout{font-size:11px;white-space:nowrap;color:#6d7d66}
 .status-dot{width:7px;height:7px;border-radius:100%;background:#a5aba2;box-shadow:0 0 0 4px #ebede7}
 .connection-status[data-phase=connected] .status-dot{background:#6b9960;box-shadow:0 0 0 4px #e7eddf}
 .connection-status[data-phase=error] .status-dot,.connection-status[data-phase=logged_out] .status-dot{background:#b47a53}

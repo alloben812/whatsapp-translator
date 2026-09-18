@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { request as httpRequest } from 'node:http';
+import { scryptSync } from 'node:crypto';
 import { createApplication, type ConnectionState } from '../src/http-app.js';
 import { Store } from '../src/store.js';
 import { TranslationService } from '../src/service.js';
@@ -122,4 +123,98 @@ test('owner authentication, origin, CSRF, deterministic contact and idempotent s
   assert.equal((await call('/api/send', { ...outgoing, idempotencyKey: 'new-key' })).status, 400);
   assert.equal(store.list().length, 1);
   assert.equal((await call('/api/state')).headers.get('cache-control'), 'no-store');
+  for (let index = 0; index < 26; index++) {
+    assert.equal((await call('/api/retry-translation', { id: `missing-${index}` })).status, 400);
+  }
+  assert.equal((await call('/api/retry-translation', { id: 'shared-limit' })).status, 429);
+  assert.equal((await call('/api/logout', {}, { 'X-CSRF-Token': 'wrong' })).status, 403);
+  const logout = await call('/api/logout', {});
+  assert.equal(logout.status, 200);
+  assert.ok(logout.headers.get('set-cookie')!.includes('Max-Age=0'));
+  assert.equal((await call('/api/state')).status, 401);
+  assert.equal((await call('/api/connect', {})).status, 401);
+});
+
+test('live app requires owner auth and accepts scrypt password hash files', async t => {
+  const web = mkdtempSync(join(tmpdir(), 'wa-http-hash-test-'));
+  for (const file of ['index.html', 'app.js', 'styles.css']) writeFileSync(join(web, file), file);
+  const makeApp = (store: Store, passwordHashFile?: string, mode: 'live' | 'demo' = 'live') => {
+    const connection = {
+      state: () => ({ phase: 'connected' as const, qr: null, account: null, errorCode: null }),
+      async connect() {},
+      async resolveContact(phone: string) { return { id: `${phone}@s.whatsapp.net` }; },
+    };
+    const service = new TranslationService(store, { async translate() { return 'Zdravo!'; } }, {
+      async send(_contact, _text, messageId) { return { messageId: messageId! }; },
+    }, []);
+    return createApplication({
+      store, service, connection, webDirectory: web, origin: 'http://127.0.0.1:8787', mode,
+      translatorStatus: () => ({ ready: true, label: 'Test fixture', reason: null }),
+      ...(passwordHashFile ? { passwordHashFile } : {}),
+    });
+  };
+  const unauthenticatedStore = new Store(':memory:');
+  assert.throws(() => makeApp(unauthenticatedStore), /Owner authentication is required/);
+  unauthenticatedStore.close();
+  const demoStore = new Store(':memory:');
+  const demo = makeApp(demoStore, undefined, 'demo');
+  demo.close(); demoStore.close();
+
+  const salt = Buffer.alloc(32, 7);
+  const hash = scryptSync('hashed-owner-password', salt, 64, { cost: 16384, blockSize: 8, parallelization: 1, maxmem: 32 * 1024 * 1024 });
+  const hashFile = join(web, 'password.hash');
+  writeFileSync(hashFile, `scrypt$16384$8$1$${salt.toString('hex')}$${hash.toString('hex')}\n`, { mode: 0o600 });
+  const badHashFile = join(web, 'bad-password.hash');
+  writeFileSync(badHashFile, `scrypt$1024$8$1$${salt.toString('hex')}$${hash.toString('hex')}\n`, { mode: 0o600 });
+  const badHashStore = new Store(':memory:');
+  assert.throws(() => makeApp(badHashStore, badHashFile), /Unsupported password hash parameters/);
+  badHashStore.close();
+  const store = new Store(':memory:');
+  const app = makeApp(store, hashFile);
+  await new Promise<void>(accept => app.listen(0, '127.0.0.1', accept));
+  t.after(async () => { app.closeAllConnections(); await new Promise<void>(accept => app.close(() => accept())); store.close(); rmSync(web, { recursive: true, force: true }); });
+  const address = app.address(); assert.ok(address && typeof address === 'object');
+  let session = ''; let csrf = '';
+  const call = (path: string, data?: unknown, extras: Record<string, string> = {}) => new Promise<Response>((accept, reject) => {
+    const req = httpRequest(`http://127.0.0.1:${address.port}${path}`, {
+      method: data === undefined ? 'GET' : 'POST',
+      headers: { Host: '127.0.0.1:8787', Cookie: session, ...(data === undefined ? {} : { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }), ...extras },
+    }, res => {
+      const chunks: Buffer[] = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(res.headers)) {
+          if (Array.isArray(value)) value.forEach(item => headers.append(name, item));
+          else if (value !== undefined) headers.set(name, value);
+        }
+        accept(new Response(Buffer.concat(chunks), { status: res.statusCode!, headers }));
+      });
+    });
+    req.on('error', reject); req.end(data === undefined ? undefined : JSON.stringify(data));
+  });
+  assert.equal((await call('/api/state')).status, 401);
+  assert.equal((await call('/api/connect', {})).status, 401);
+  for (let index = 0; index < 10; index++) assert.equal((await call('/api/login', { password: 'wrong' })).status, 401);
+  assert.equal((await call('/api/login', { password: 'wrong' })).status, 429);
+  const realLoginNow = Date.now;
+  try {
+    Date.now = () => realLoginNow() + 301000;
+    assert.equal((await call('/api/login', { password: 'wrong' })).status, 401);
+  } finally { Date.now = realLoginNow; }
+  const login = await call('/api/login', { password: 'hashed-owner-password' });
+  assert.equal(login.status, 200);
+  session = login.headers.get('set-cookie')!.split(';')[0]!;
+  assert.ok(login.headers.get('set-cookie')!.includes('HttpOnly'));
+  const state = await (await call('/api/state')).json(); csrf = state.csrfToken;
+  assert.equal(state.auth.required, true);
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 13 * 3600000;
+    assert.equal((await call('/api/state')).status, 401);
+  } finally { Date.now = realNow; }
+  assert.equal((await call('/api/state', undefined, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await call('/api/connect', {}, { Origin: 'https://evil.example' })).status, 403);
+  assert.equal((await call('/api/logout', {})).status, 200);
+  assert.equal((await call('/api/state')).status, 401);
 });

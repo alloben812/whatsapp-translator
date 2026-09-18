@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import QRCode from 'qrcode';
@@ -38,8 +38,14 @@ export interface ApplicationOptions {
   webDirectory: string;
   origin: string;
   password?: string;
+  passwordHashFile?: string;
   mode?: 'live' | 'demo';
 }
+
+type PasswordVerifier =
+  | { kind: 'legacy'; hash: Buffer }
+  | { kind: 'scrypt'; cost: number; blockSize: number; parallelization: number; salt: Buffer; hash: Buffer };
+type Session = { csrf: string; expires: number; limits: Map<string, { count: number; since: number }> };
 
 const messages: Record<string, string> = {
   invalid_input: 'Проверьте номер, имя и текст сообщения.',
@@ -99,21 +105,69 @@ async function audioBody(request: IncomingMessage): Promise<Buffer> {
 function cookie(request: IncomingMessage): string | undefined {
   return request.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith('wa_session='))?.slice(11);
 }
+function clearSessionCookie(origin: URL): string {
+  return `wa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${origin.protocol === 'https:' ? '; Secure' : ''}`;
+}
+function throttle(session: Session, key: string, limit: number, windowMs: number): void {
+  const now = Date.now();
+  const bucket = session.limits.get(key);
+  if (!bucket || now - bucket.since > windowMs) {
+    session.limits.set(key, { count: 1, since: now });
+    return;
+  }
+  bucket.count++;
+  if (bucket.count > limit) fail('rate_limited');
+}
 function send(response: ServerResponse, status: number, value: unknown): void {
   if (response.destroyed || response.writableEnded) return;
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(value));
+}
+function loadPasswordVerifier(options: ApplicationOptions): PasswordVerifier | null {
+  if (options.passwordHashFile) {
+    const value = readFileSync(options.passwordHashFile, 'utf8').trim();
+    const match = /^scrypt\$(\d+)\$(\d+)\$(\d+)\$([0-9a-f]{64})\$([0-9a-f]{128})$/i.exec(value);
+    if (!match) throw new Error('Invalid password hash file');
+    const costText = match[1]!;
+    const blockSizeText = match[2]!;
+    const parallelizationText = match[3]!;
+    const saltHex = match[4]!;
+    const hashHex = match[5]!;
+    const cost = Number(costText);
+    const blockSize = Number(blockSizeText);
+    const parallelization = Number(parallelizationText);
+    if (cost !== 16384 || blockSize !== 8 || parallelization !== 1) throw new Error('Unsupported password hash parameters');
+    return { kind: 'scrypt', cost, blockSize, parallelization, salt: Buffer.from(saltHex, 'hex'), hash: Buffer.from(hashHex, 'hex') };
+  }
+  return options.password ? { kind: 'legacy', hash: createHash('sha256').update(options.password).digest() } : null;
 }
 
 /** Same-origin owner interface. No incoming message can invoke an HTTP operation. */
 export function createApplication(options: ApplicationOptions) {
   const origin = new URL(options.origin);
   if (!['http:', 'https:'].includes(origin.protocol) || origin.origin !== options.origin) throw new Error('Invalid application origin');
-  if (!options.password && !['127.0.0.1', 'localhost', '[::1]'].includes(origin.hostname)) throw new Error('Public access requires authentication');
-  const sessions = new Map<string, { csrf: string; expires: number }>();
-  const localSession = { csrf: randomBytes(32).toString('hex'), expires: Infinity };
-  const passwordHash = options.password ? createHash('sha256').update(options.password).digest() : null;
+  const passwordVerifier = loadPasswordVerifier(options);
+  if (!passwordVerifier && options.mode !== 'demo') throw new Error('Owner authentication is required');
+  const sessions = new Map<string, Session>();
+  const localSession = { csrf: randomBytes(32).toString('hex'), expires: Infinity, limits: new Map<string, { count: number; since: number }>() };
   const loginAttempts = new Map<string, { count: number; since: number }>();
+  let activePasswordHashes = 0;
+  const verifyPassword = async (password: string): Promise<boolean> => {
+    if (!passwordVerifier) return true;
+    if (passwordVerifier.kind === 'legacy') {
+      return timingSafeEqual(passwordVerifier.hash, createHash('sha256').update(password).digest());
+    }
+    if (activePasswordHashes >= 2) fail('rate_limited');
+    activePasswordHashes++;
+    try {
+      const candidate = await new Promise<Buffer>((resolve, reject) => {
+        scrypt(password, passwordVerifier.salt, passwordVerifier.hash.length, {
+          cost: passwordVerifier.cost, blockSize: passwordVerifier.blockSize, parallelization: passwordVerifier.parallelization, maxmem: 32 * 1024 * 1024,
+        }, (error, key) => error ? reject(error) : resolve(key));
+      });
+      return timingSafeEqual(passwordVerifier.hash, candidate);
+    } finally { activePasswordHashes--; }
+  };
   const assets = new Map([
     ['/', { type: 'text/html; charset=utf-8', bytes: readFileSync(join(options.webDirectory, 'index.html')) }],
     ['/app.js', { type: 'text/javascript; charset=utf-8', bytes: readFileSync(join(options.webDirectory, 'app.js')) }],
@@ -144,16 +198,17 @@ export function createApplication(options: ApplicationOptions) {
         const attempt = loginAttempts.get(address) ?? { count: 0, since: now };
         attempt.count++; loginAttempts.set(address, attempt);
         if (attempt.count > 10 || loginAttempts.size > 1000) fail('rate_limited');
-        if (passwordHash && !timingSafeEqual(passwordHash, createHash('sha256').update(input.password).digest())) fail('unauthorized');
+        if (!await verifyPassword(input.password)) fail('unauthorized');
         for (const [key, session] of sessions) if (session.expires < now) sessions.delete(key);
         if (sessions.size >= 20) fail('rate_limited');
         const token = randomBytes(32).toString('hex');
-        sessions.set(token, { csrf: randomBytes(32).toString('hex'), expires: now + 12 * 3600000 });
+        sessions.set(token, { csrf: randomBytes(32).toString('hex'), expires: now + 12 * 3600000, limits: new Map() });
         response.setHeader('Set-Cookie', `wa_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200${origin.protocol === 'https:' ? '; Secure' : ''}`);
         loginAttempts.delete(address);
         send(response, 200, { ok: true }); return;
       }
-      const session = passwordHash ? sessions.get(cookie(request) ?? '') : localSession;
+      const sessionCookie = cookie(request);
+      const session = passwordVerifier ? sessions.get(sessionCookie ?? '') : localSession;
       if (!session || session.expires < Date.now()) fail('unauthorized');
       const url = new URL(path, origin);
       if (request.method === 'GET' && url.pathname === '/api/state') {
@@ -166,7 +221,7 @@ export function createApplication(options: ApplicationOptions) {
         const pending = requestKeys[0] ? options.store.byRequestKey(requestKeys[0]) : undefined;
         if (pending && !recent.some(message => message.id === pending.id)) recent.push(pending);
         send(response, 200, {
-          mode: options.mode ?? 'live', csrfToken: session.csrf,
+          mode: options.mode ?? 'live', auth: { required: Boolean(passwordVerifier) }, csrfToken: session.csrf,
           whatsapp: { phase: state.phase, qrDataUrl: qrCache?.dataUrl ?? null, account: state.account, errorCode: state.errorCode },
           translator: options.translatorStatus(), languages: CONTACT_LANGUAGES,
           speech: { ready: Boolean(options.transcriber && options.speechReady?.()), language: 'ru', maxSeconds: 60 },
@@ -177,7 +232,14 @@ export function createApplication(options: ApplicationOptions) {
       }
       if (request.method !== 'POST') fail('not_found');
       if (request.headers['x-csrf-token'] !== session.csrf) fail('forbidden');
+      if (path === '/api/logout') {
+        exact(await body(request), []);
+        if (sessionCookie) sessions.delete(sessionCookie);
+        response.setHeader('Set-Cookie', clearSessionCookie(origin));
+        send(response, 200, { ok: true }); return;
+      }
       if (path === '/api/transcribe') {
+        throttle(session, 'transcribe', 6, 60000);
         if (!options.transcriber || !options.speechReady?.()) fail('transcription_unavailable');
         const audio = await audioBody(request);
         const text = await options.transcriber.transcribe(audio, 'ru');
@@ -185,9 +247,11 @@ export function createApplication(options: ApplicationOptions) {
       }
       const input = await body(request);
       if (path === '/api/connect') {
+        throttle(session, 'connect', 6, 300000);
         exact(input, []); await options.connection.connect(); send(response, 202, { ok: true }); return;
       }
       if (path === '/api/chats/sync') {
+        throttle(session, 'chats/sync', 10, 300000);
         exact(input, []);
         if (options.connection.state().phase !== 'connected' || !options.syncChats) fail('whatsapp_unavailable');
         // The controller records completion/errors; HTTP does not retain the request while syncing.
@@ -228,6 +292,7 @@ export function createApplication(options: ApplicationOptions) {
         send(response, 200, contact); return;
       }
       if (path === '/api/send') {
+        throttle(session, 'message-action', 30, 60000);
         const value = exact(input, ['contactId', 'text', 'idempotencyKey']);
         if (typeof value.contactId !== 'string' || typeof value.text !== 'string' || typeof value.idempotencyKey !== 'string') fail('invalid_input');
         const known = options.store.byRequestKey(value.idempotencyKey);
@@ -238,6 +303,7 @@ export function createApplication(options: ApplicationOptions) {
         send(response, 200, await options.service.send(value as unknown as SendRequest)); return;
       }
       if (path === '/api/retry-translation') {
+        throttle(session, 'message-action', 30, 60000);
         const value = exact(input, ['id']);
         if (typeof value.id !== 'string') fail('invalid_input');
         if (!options.translatorStatus().ready) fail('translator_unavailable');

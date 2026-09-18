@@ -37,3 +37,32 @@ test('discovered WhatsApp metadata persists separately from translation contacts
     assert.equal(store.list().length, 0);
   } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('discovered chat directory caps new rows globally while updating existing rows', () => {
+  const store = new Store(':memory:');
+  try {
+    const chats = Array.from({ length: 10000 }, (_, index) => {
+      const phone = String(381600000000 + index);
+      return {
+        id: `${phone}@s.whatsapp.net`,
+        name: `Контакт ${index}`,
+        lastMessageAt: new Date(Date.UTC(2026, 8, 18, 12, 0, index % 60)).toISOString(),
+        preview: `Сообщение ${index}`,
+      };
+    });
+    store.saveDiscoveredChats(chats);
+    assert.equal(store.chats().length, 10000);
+
+    const existing = chats[1234]!.id;
+    const extra = '381699999999@s.whatsapp.net';
+    store.saveDiscoveredChats([
+      { id: extra, name: 'Лишний чат', lastMessageAt: '2026-09-19T12:00:00Z', preview: 'Не должен сохраниться' },
+      { id: existing, name: 'Обновлённый контакт', lastMessageAt: '2026-09-20T12:00:00Z', preview: 'Новое сообщение' },
+    ]);
+
+    assert.equal(store.chats().length, 10000);
+    assert.throws(() => store.openDiscoveredChat(extra), /Unknown WhatsApp chat/);
+    assert.equal(store.openDiscoveredChat(existing).name, 'Обновлённый контакт');
+    assert.equal(store.contacts().some(contact => contact.id === existing), true);
+  } finally { store.close(); }
+});

@@ -21,6 +21,7 @@ let speechSession = null;
 let openingChatId = null;
 let syncingChats = false;
 let chatQuery = '';
+let authGeneration = 0;
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 const AUDIO_TYPES = ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
 const drafts = new Map();
@@ -230,11 +231,40 @@ async function api(path, body, options = {}) {
   } finally { clearTimeout(timeout); }
 }
 
-function showLogin() {
+function clearPrivateView() {
+  state = null;
+  selectedId = null;
+  contactFingerprint = '';
+  messageFingerprint = '';
+  writeStorage(SELECTED_STORAGE, null);
+  $('contact-list').replaceChildren();
+  $('message-list').replaceChildren();
+  $('empty-contacts').hidden = true;
+  $('pending-notice').hidden = true;
+  $('chat-tools').hidden = true;
+  $('chat-sync-status').hidden = true;
+  $('contact-count').textContent = '0';
+  $('contact-name').textContent = 'Место для разговора';
+  $('contact-phone').textContent = 'Выберите собеседника слева';
+  $('contact-avatar').textContent = '↔';
+  $('recipient-label').textContent = 'Сначала выберите чат';
+  $('language-route').textContent = 'Перевод личных чатов';
+  $('qr-panel').hidden = true;
+  $('qr-placeholder').hidden = false;
+  $('qr-image').removeAttribute('src');
+  $('message-text').value = pending?.text || '';
+  $('message-text').disabled = true;
+  $('send-button').disabled = true;
+  $('app').classList.remove('chat-open');
+}
+
+function showLogin({ clear = false } = {}) {
+  authGeneration++;
   cancelDictation();
   loginRequired = true;
   clearTimeout(pollTimer);
   $('app').hidden = true;
+  if (clear) clearPrivateView();
   const wasHidden = $('login-view').hidden;
   $('login-view').hidden = false;
   if ($('contact-dialog').open) $('contact-dialog').close();
@@ -244,10 +274,12 @@ function showLogin() {
 async function poll({ manual = false } = {}) {
   if (polling) return polling;
   clearTimeout(pollTimer);
+  const generation = authGeneration;
   polling = (async () => {
     try {
       const path = pending ? `state?requestKey=${encodeURIComponent(pending.idempotencyKey)}` : 'state';
       const next = await api(path);
+      if (generation !== authGeneration) return false;
       next.messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       state = next;
       loginRequired = false;
@@ -278,7 +310,7 @@ async function poll({ manual = false } = {}) {
       return false;
     } finally {
       polling = null;
-      if (!loginRequired) pollTimer = setTimeout(() => { void poll(); }, POLL_DELAY);
+      if (!loginRequired && generation === authGeneration) pollTimer = setTimeout(() => { void poll(); }, POLL_DELAY);
     }
   })();
   return polling;
@@ -335,6 +367,7 @@ function render() {
   $('connection-status').dataset.phase = phase;
   $('connection-label').textContent = labels[phase] || 'Проверяем связь';
   $('demo-label').hidden = state.mode !== 'demo';
+  $('owner-logout').hidden = !state.auth?.required;
   $('demo-notice').hidden = state.mode !== 'demo';
   $('setup-panel').hidden = connected;
   $('open-connection').hidden = connected;
@@ -959,14 +992,26 @@ $('login-form').addEventListener('submit', async (event) => {
   $('login-button').disabled = true;
   $('login-error').hidden = true;
   try {
+    const previousPolling = polling;
     await api('login', { password: $('password').value });
     $('password').value = '';
     loginRequired = false;
+    authGeneration++;
+    if (previousPolling) await previousPolling;
     await poll();
   } catch (error) {
     $('login-error').textContent = error.status === 401 ? 'Пароль не подошёл. Попробуйте ещё раз.' : readableError(error.code);
     $('login-error').hidden = false;
   } finally { $('login-button').disabled = false; }
+});
+
+$('owner-logout').addEventListener('click', async () => {
+  $('owner-logout').disabled = true;
+  try {
+    await api('logout', {});
+    showLogin({ clear: true });
+  } catch (error) { toast(readableError(error.code)); }
+  finally { $('owner-logout').disabled = false; }
 });
 
 document.addEventListener('visibilitychange', () => {

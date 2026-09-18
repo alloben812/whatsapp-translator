@@ -23,7 +23,7 @@ async function main(): Promise<void> {
   if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid application port');
   const origin = process.env.WA_ORIGIN ?? `http://${host === '::1' ? '[::1]' : host}:${port}`;
   const socketPath = process.env.WA_SOCKET_PATH;
-  if (!socketPath && !process.env.WA_PASSWORD) throw new Error('TCP access requires owner authentication');
+  if (!process.env.WA_PASSWORD && !process.env.WA_PASSWORD_HASH_FILE) throw new Error('Owner authentication is required');
   if (socketPath) {
     if (!isAbsolute(socketPath) || socketPath !== resolve(socketPath)) throw new Error('Invalid private socket path');
     const directory = lstatSync(dirname(socketPath));
@@ -100,6 +100,7 @@ async function main(): Promise<void> {
     transcriber: speech.transcriber, speechReady: () => speechReady,
     chatSyncStatus: () => chatSync, syncChats,
     ...(process.env.WA_PASSWORD ? { password: process.env.WA_PASSWORD } : {}),
+    ...(process.env.WA_PASSWORD_HASH_FILE ? { passwordHashFile: process.env.WA_PASSWORD_HASH_FILE } : {}),
   });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);

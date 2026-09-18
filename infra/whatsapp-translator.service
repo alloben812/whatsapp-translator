@@ -9,6 +9,8 @@ User=whatsapp-translator
 Group=whatsapp-translator
 WorkingDirectory=/opt/whatsapp-translator/current
 EnvironmentFile=/etc/whatsapp-translator/application.env
+LoadCredential=owner-password:/etc/whatsapp-translator/owner-password.scrypt
+Environment=WA_PASSWORD_HASH_FILE=/run/credentials/whatsapp-translator.service/owner-password
 ExecStart=/usr/bin/flock -n /var/lib/whatsapp-translator/process.lock /opt/node-v22.23.2-linux-x64/bin/node /opt/whatsapp-translator/current/dist/src/server.js
 Restart=on-failure
 RestartSec=5
