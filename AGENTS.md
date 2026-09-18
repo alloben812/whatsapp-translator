@@ -24,7 +24,7 @@ Current handoff: paused at the owner's request until tomorrow; read `docs/resume
 - Install: npm ci --ignore-scripts.
 - Meaningful behavioral verification: npm test; offline walkthrough: npm run demo.
 - Keep dependencies pinned, commit package-lock.json and keep runtime secrets out of Git.
-- Use codex/ branches for subsequent development. The initial foundation is on main.
+- Start a new session from up-to-date main; create a new codex/ branch from it for subsequent development. Do not resume from the old codex/live-translator branch by default.
 - No automatic deployment or model calls in CI.
 - Keep commits focused and document material limitations honestly.
 

@@ -42,14 +42,14 @@ GitHub переносит код. Проверить `gh auth status` и дос�
 ```sh
 gh repo clone alloben812/whatsapp-translator
 cd whatsapp-translator
-git switch codex/live-translator
+git switch main
 npm ci --ignore-scripts
 npm run doctor
 npm test
 npm run demo
 ```
 
-Нужны Node.js 22.17+ и Python 3. Эти проверки не используют WhatsApp, модели или секреты. Разработку продолжать в ветке `codex/…`.
+Нужны Node.js 22.17+ и Python 3. Эти проверки не используют WhatsApp, модели или секреты. Для новой сессии брать актуальный `main`; последующие изменения делать в новой ветке `codex/…` от него.
 
 Короткий запрос для продолжения:
 

@@ -44,7 +44,7 @@
 ```sh
 gh repo clone alloben812/whatsapp-translator
 cd whatsapp-translator
-git switch codex/live-translator
+git switch main
 npm ci --ignore-scripts
 npm run doctor
 npm test
