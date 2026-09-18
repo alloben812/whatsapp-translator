@@ -15,6 +15,7 @@ let contactFingerprint = '';
 let messageFingerprint = '';
 let loginRequired = false;
 let firstState = true;
+let showingQr = false;
 const drafts = new Map();
 
 function readStorage(key) {
@@ -248,6 +249,8 @@ function render() {
         : phase === 'error' ? 'Не удалось установить соединение с WhatsApp. Попробуйте подключить его снова.'
           : 'Подключите свой аккаунт. Номер и привычные чаты остаются с вами.';
   const validQr = phase === 'qr' && typeof state.whatsapp.qrDataUrl === 'string' && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(state.whatsapp.qrDataUrl);
+  const qrJustAppeared = validQr && !showingQr;
+  showingQr = validQr;
   $('qr-panel').hidden = !validQr;
   $('qr-placeholder').hidden = validQr;
   if (validQr) {
@@ -261,6 +264,7 @@ function render() {
   renderContacts();
   renderConversation();
   updateComposer();
+  if (qrJustAppeared) requestAnimationFrame(() => { $('conversation-scroll').scrollTop = 0; });
 }
 
 function translationReason(reason) {
@@ -321,7 +325,9 @@ function renderConversation(forceScroll = false) {
   $('contact-avatar').textContent = contact ? initials(contact.name) : '↔';
   $('recipient-label').textContent = contact ? `Кому: ${contact.name} · ${phone(contact.id)}` : 'Сначала выберите чат';
   const messages = contact ? state.messages.filter((message) => message.contactId === selectedId) : [];
-  $('empty-conversation').hidden = messages.length > 0;
+  const connectingWithoutContact = !contact && state.whatsapp.phase !== 'connected';
+  $('empty-conversation').hidden = messages.length > 0 || connectingWithoutContact;
+  $('compose-form').hidden = connectingWithoutContact;
   $('add-from-conversation').hidden = Boolean(contact);
   $('empty-title').textContent = contact ? 'Первое слово за вами.' : 'Просто начните разговор.';
   $('empty-description').textContent = contact ? `Напишите ${contact.name} по-русски. Сообщение будет переведено на сербский и отправлено в этот чат.` : 'Выберите чат или добавьте собеседника. Перевод появится рядом с каждым сообщением.';
@@ -342,7 +348,7 @@ function renderConversation(forceScroll = false) {
     fragment.append(messageElement(message));
   }
   $('message-list').replaceChildren(fragment);
-  if (nearBottom || forceScroll) requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
+  if (contact && messages.length > 0 && (nearBottom || forceScroll)) requestAnimationFrame(() => { scroll.scrollTop = scroll.scrollHeight; });
 }
 
 function messageElement(message) {
