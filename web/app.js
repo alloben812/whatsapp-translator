@@ -16,6 +16,10 @@ let messageFingerprint = '';
 let loginRequired = false;
 let firstState = true;
 let showingQr = false;
+let changingLanguage = null;
+let speechSession = null;
+const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
+const AUDIO_TYPES = ['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav'];
 const drafts = new Map();
 
 function readStorage(key) {
@@ -53,6 +57,21 @@ function element(tag, className, text) {
 function phone(id) { return `+${String(id).split('@')[0]}`; }
 function initials(name) { return name.trim().split(/\s+/u).slice(0, 2).map((part) => Array.from(part)[0] || '').join('').toLocaleUpperCase('ru'); }
 function contactFor(id) { return state?.contacts.find((contact) => contact.id === id); }
+function languages() { return state?.languages || [{ code: 'sr-Latn', label: 'Сербский · латиница' }]; }
+function languageLabel(code) { return code === 'ru' ? 'Русский' : languages().find((item) => item.code === code)?.label || code || 'Язык собеседника'; }
+function fillLanguageSelect(select, value) {
+  const catalog = languages();
+  const fingerprint = JSON.stringify(catalog);
+  if (select.dataset.catalog !== fingerprint) {
+    select.replaceChildren(...catalog.map((item) => {
+      const option = element('option', '', item.label);
+      option.value = item.code;
+      return option;
+    }));
+    select.dataset.catalog = fingerprint;
+  }
+  if (catalog.some((item) => item.code === value)) select.value = value;
+}
 function time(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
@@ -91,6 +110,15 @@ function readableError(code) {
     rate_limited: 'Слишком много попыток. Подождите немного и попробуйте снова.',
     too_many_requests: 'Слишком много попыток. Подождите немного и попробуйте снова.',
     retry_not_allowed: 'Повторить можно только перевод входящего сообщения с ошибкой.',
+    invalid_language: 'Этот язык пока недоступен. Выберите язык из списка.',
+    invalid_audio: 'Нужна запись голоса до 60 секунд и 8 МБ. Повторите запись или введите текст.',
+    transcription_busy: 'Предыдущая запись ещё распознаётся. Дождитесь результата.',
+    transcription_timeout: 'Не удалось распознать запись вовремя. Попробуйте более короткую фразу.',
+    transcription_unavailable: 'Диктовка временно недоступна. Можно ввести текст вручную.',
+    invalid_transcription: 'Не удалось разобрать речь. Повторите запись или введите текст.',
+    transcription_output_limit: 'Результат слишком большой. Запишите более короткую фразу.',
+    unsupported_audio: 'Этот формат записи не поддерживается. Попробуйте другой браузер или введите текст.',
+    audio_too_large: 'Запись слишком большая. Запишите более короткую фразу.',
     network: 'Не удалось связаться с переводчиком. Проверьте подключение к интернету.',
   };
   return messages[String(code || '').toLowerCase()] || 'Не получилось выполнить действие. Попробуйте позже.';
@@ -103,17 +131,17 @@ function toast(message) {
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 6000);
 }
 
-async function api(path, body) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), body === undefined ? 12000 : 45000);
+async function api(path, body, options = {}) {
+  const controller = options.controller || new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? (body === undefined ? 12000 : 45000));
   try {
     const headers = {};
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (body !== undefined) headers['Content-Type'] = options.raw ? body.type : 'application/json';
     if (body !== undefined && path !== 'login') headers['X-CSRF-Token'] = state?.csrfToken || '';
     const response = await fetch(`api/${path}`, {
       method: body === undefined ? 'GET' : 'POST',
       credentials: 'same-origin', cache: 'no-store', headers,
-      body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal,
+      body: body === undefined ? undefined : options.raw ? body : JSON.stringify(body), signal: controller.signal,
     });
     let data;
     try { data = await response.json(); } catch { data = null; }
@@ -131,12 +159,17 @@ async function api(path, body) {
     }
     return data;
   } catch (error) {
-    if (!error.code || error.name === 'AbortError') error.code = 'network';
+    if (typeof error.code !== 'string' || error.name === 'AbortError') {
+      throw Object.assign(new Error('Request unavailable'), {
+        code: path === 'transcribe' && error.name === 'AbortError' ? 'transcription_timeout' : 'network',
+      });
+    }
     throw error;
   } finally { clearTimeout(timeout); }
 }
 
 function showLogin() {
+  cancelDictation();
   loginRequired = true;
   clearTimeout(pollTimer);
   $('app').hidden = true;
@@ -212,7 +245,7 @@ function restoreFailedOutgoing(id) {
     toast('Откройте чат с этим собеседником и проверьте состояние сообщения.');
     return;
   }
-  if (pending || sending) {
+  if (pending || sending || speechSession || changingLanguage) {
     toast('Сначала дождитесь результата предыдущей отправки.');
     return;
   }
@@ -240,7 +273,7 @@ function render() {
   $('setup-panel').hidden = connected;
   $('open-connection').hidden = connected;
   for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation', 'save-contact']) {
-    $(id).disabled = !connected || (id === 'save-contact' && savingContact);
+    $(id).disabled = !connected || Boolean(speechSession || changingLanguage) || (id === 'save-contact' && savingContact);
     $(id).title = connected ? '' : 'Сначала подключите WhatsApp';
   }
   $('setup-description').textContent = phase === 'qr' ? 'Отсканируйте код своим телефоном. Этот переводчик появится в списке связанных устройств.'
@@ -261,6 +294,7 @@ function render() {
   $('connect-button').textContent = connecting || phase === 'connecting' ? 'Подключаем…' : phase === 'logged_out' || phase === 'error' ? 'Подключить снова ↗' : 'Подключить WhatsApp ↗';
   $('translator-notice').hidden = state.translator.ready;
   $('translator-reason').textContent = state.translator.ready ? '' : translationReason(state.translator.reason);
+  fillLanguageSelect($('new-contact-language'), $('new-contact-language').value || 'sr-Latn');
   renderContacts();
   renderConversation();
   updateComposer();
@@ -305,6 +339,10 @@ function renderContacts() {
 }
 
 function selectContact(id) {
+  if (speechSession || changingLanguage) {
+    toast(speechSession ? 'Завершите или отмените диктовку, прежде чем сменить чат.' : 'Сначала дождитесь сохранения языка.');
+    return;
+  }
   if (selectedId) drafts.set(selectedId, $('message-text').value);
   selectedId = id;
   writeStorage(SELECTED_STORAGE, id);
@@ -324,14 +362,17 @@ function renderConversation(forceScroll = false) {
   $('contact-phone').textContent = contact ? phone(contact.id) : 'Ваши чаты и переводы — в одном месте';
   $('contact-avatar').textContent = contact ? initials(contact.name) : '↔';
   $('recipient-label').textContent = contact ? `Кому: ${contact.name} · ${phone(contact.id)}` : 'Сначала выберите чат';
+  $('contact-language-control').hidden = !contact;
+  $('language-route').textContent = contact ? `Русский ↔ ${languageLabel(contact.language || 'sr-Latn')}` : 'Перевод личных чатов';
+  if (contact) fillLanguageSelect($('contact-language'), changingLanguage?.contactId === contact.id ? changingLanguage.language : contact.language || 'sr-Latn');
   const messages = contact ? state.messages.filter((message) => message.contactId === selectedId) : [];
   const connectingWithoutContact = !contact && state.whatsapp.phase !== 'connected';
   $('empty-conversation').hidden = messages.length > 0 || connectingWithoutContact;
   $('compose-form').hidden = connectingWithoutContact;
   $('add-from-conversation').hidden = Boolean(contact);
   $('empty-title').textContent = contact ? 'Первое слово за вами.' : 'Просто начните разговор.';
-  $('empty-description').textContent = contact ? `Напишите ${contact.name} по-русски. Сообщение будет переведено на сербский и отправлено в этот чат.` : 'Выберите чат или добавьте собеседника. Перевод появится рядом с каждым сообщением.';
-  const fingerprint = JSON.stringify([selectedId, messages]);
+  $('empty-description').textContent = contact ? `Напишите ${contact.name} по-русски. Язык перевода: ${languageLabel(contact.language || 'sr-Latn')}. Сообщение уйдёт в этот чат.` : 'Выберите чат или добавьте собеседника. Перевод появится рядом с каждым сообщением.';
+  const fingerprint = JSON.stringify([selectedId, messages, languages()]);
   if (messageFingerprint === fingerprint && !forceScroll) return;
   messageFingerprint = fingerprint;
   const scroll = $('conversation-scroll');
@@ -359,14 +400,14 @@ function messageElement(message) {
   if (!outgoing && message.translatedText) {
     bubble.append(element('p', 'message-translation', message.translatedText));
     const original = element('div', 'translation-block');
-    original.append(element('span', 'translation-label', 'Оригинал · сербский'));
+    original.append(element('span', 'translation-label', `Оригинал · ${languageLabel(message.sourceLanguage || 'sr-Latn')}`));
     original.append(element('p', 'message-original', message.originalText));
     bubble.append(original);
   } else {
     bubble.append(element('p', 'message-original', message.originalText));
     if (message.translatedText) {
       const translated = element('div', 'translation-block');
-      translated.append(element('span', 'translation-label', 'Перевод · сербский'));
+      translated.append(element('span', 'translation-label', `Перевод · ${languageLabel(message.targetLanguage || 'sr-Latn')}`));
       translated.append(element('p', 'message-translation', message.translatedText));
       bubble.append(translated);
     }
@@ -410,22 +451,193 @@ function updateComposer() {
   const networkOk = $('network-banner').hidden;
   const locked = Boolean(pending) || sending;
   $('message-text').disabled = !contact || locked;
-  $('send-button').disabled = !contact || !connected || !available || !networkOk || locked || !$('message-text').value.trim();
+  const tooLong = $('message-text').value.length > 4000;
+  $('send-button').disabled = !contact || !connected || !available || !networkOk || locked || Boolean(speechSession || changingLanguage) || tooLong || !$('message-text').value.trim();
   for (const button of document.querySelectorAll('.restore-message')) {
-    button.disabled = locked || button.dataset.contactId !== selectedId;
+    button.disabled = locked || Boolean(speechSession || changingLanguage) || button.dataset.contactId !== selectedId;
   }
+  for (const button of document.querySelectorAll('.contact-button')) button.disabled = Boolean(speechSession || changingLanguage);
+  $('back-to-chats').disabled = Boolean(speechSession || changingLanguage);
+  $('contact-language').disabled = !contact || locked || Boolean(speechSession || changingLanguage) || !networkOk;
+  for (const id of ['add-contact', 'add-first-contact', 'add-from-conversation']) $(id).disabled = !connected || Boolean(speechSession || changingLanguage);
+  updateDictation();
   $('send-button').firstElementChild.textContent = sending ? 'Отправляем…' : 'Перевести и отправить';
   $('pending-notice').hidden = !pending;
   if (pending) {
     const recipient = contactFor(pending.contactId);
     $('pending-description').textContent = `Сообщение для ${recipient?.name || phone(pending.contactId)}. Ответ пока не получен. Повторно не отправляем.`;
   }
-  $('compose-help').textContent = pending ? 'Сначала проверьте результат предыдущего сообщения.'
+  $('compose-help').textContent = speechSession ? 'Диктовка только добавляет текст. Отправка доступна после проверки черновика.'
+    : changingLanguage ? 'Сохраняем язык собеседника…'
+    : tooLong ? 'Текст длиннее 4000 символов. Разделите его перед отправкой; весь текст сохранён в поле.'
+    : pending ? 'Сначала проверьте результат предыдущего сообщения.'
     : !contact ? 'Выберите собеседника или добавьте новый чат.'
       : !networkOk ? 'Отправка будет доступна, когда восстановится связь.'
         : !connected ? 'Подключите WhatsApp, чтобы отправить сообщение.'
           : !available ? 'Отправка станет доступна, когда подключится переводчик.'
             : 'Enter — перевести и отправить · Shift + Enter — новая строка';
+}
+
+function recordingType() {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined'
+    || typeof MediaRecorder.isTypeSupported !== 'function') return null;
+  return ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/ogg', 'audio/wav']
+    .find((type) => MediaRecorder.isTypeSupported(type)) || null;
+}
+
+function updateDictation() {
+  const supported = Boolean(recordingType());
+  const available = supported && state?.speech?.ready;
+  $('start-dictation').hidden = Boolean(speechSession);
+  $('start-dictation').disabled = !available || !contactFor(selectedId) || Boolean(pending || sending || changingLanguage) || !$('network-banner').hidden;
+  $('voice-help').textContent = !supported ? 'Диктовка недоступна в этом браузере. Можно ввести текст вручную.'
+    : !state?.speech?.ready ? 'Распознавание пока недоступно. Можно ввести текст вручную.'
+      : 'Диктовка добавит текст в черновик. Перед отправкой проверьте его.';
+  $('voice-status').hidden = !speechSession;
+  if (!speechSession) return;
+  const recording = speechSession.phase === 'recording';
+  $('voice-status').dataset.phase = speechSession.phase;
+  $('voice-state-label').textContent = recording ? 'Идёт запись'
+    : speechSession.phase === 'permission' ? 'Ожидаем доступ к микрофону…' : 'Распознаём русский текст…';
+  $('stop-dictation').hidden = !recording;
+  $('voice-timer').hidden = !recording;
+  if (recording) {
+    const elapsed = Math.min(speechSession.maxSeconds, Math.floor((Date.now() - speechSession.startedAt) / 1000));
+    const clock = (seconds) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    $('voice-timer').textContent = `${clock(elapsed)} / ${clock(speechSession.maxSeconds)}`;
+  }
+}
+
+function releaseMicrophone(session) {
+  clearInterval(session.timer);
+  clearTimeout(session.deadline);
+  session.stream?.getTracks().forEach((track) => track.stop());
+}
+
+function voiceError(text) {
+  $('voice-error').textContent = text;
+  $('voice-error').hidden = false;
+}
+
+function cancelDictation(reason) {
+  const session = speechSession;
+  if (!session) return;
+  session.cancelled = true;
+  session.controller?.abort();
+  try { if (session.recorder?.state === 'recording') session.recorder.stop(); } catch { /* Tracks are closed below even if the recorder already stopped. */ }
+  releaseMicrophone(session);
+  session.chunks = [];
+  speechSession = null;
+  updateComposer();
+  if (reason) voiceError(reason);
+}
+
+function stopDictation() {
+  const session = speechSession;
+  if (!session || session.phase !== 'recording') return;
+  session.phase = 'transcribing';
+  try {
+    if (session.recorder.state !== 'inactive') session.recorder.stop();
+  } catch {
+    cancelDictation('Запись прервалась. Повторите диктовку или введите текст вручную.');
+  } finally { releaseMicrophone(session); }
+  updateComposer();
+}
+
+function appendTranscription(contactId, text) {
+  // Use the current draft, not the text captured when recording started: typing
+  // during recognition must survive. Never insert into a different contact's chat.
+  const current = selectedId === contactId ? $('message-text').value : drafts.get(contactId) || '';
+  const combined = current ? `${current}${/\s$/.test(current) ? '' : '\n'}${text}` : text;
+  drafts.set(contactId, combined);
+  if (selectedId === contactId) {
+    $('message-text').value = combined;
+    resizeComposer();
+  }
+}
+
+async function transcribeRecording(session) {
+  releaseMicrophone(session);
+  if (session.cancelled || speechSession !== session) return;
+  session.phase = 'transcribing';
+  updateComposer();
+  try {
+    const mime = session.recorder.mimeType.split(';')[0].toLowerCase();
+    if (!AUDIO_TYPES.includes(mime) || session.bytes === 0 || session.bytes > MAX_AUDIO_BYTES) {
+      throw Object.assign(new Error('Invalid recording'), { code: 'unsupported_audio' });
+    }
+    const audio = new Blob(session.chunks, { type: mime });
+    session.chunks = [];
+    session.controller = new AbortController();
+    const result = await api('transcribe', audio, { raw: true, timeoutMs: 90000, controller: session.controller });
+    if (session.cancelled || speechSession !== session) return;
+    if (typeof result.text !== 'string' || !result.text.trim()) throw Object.assign(new Error('Empty transcription'), { code: 'invalid_transcription' });
+    appendTranscription(session.contactId, result.text.trim());
+    toast('Текст добавлен в черновик. Проверьте его перед отправкой.');
+  } catch (error) {
+    if (!session.cancelled && speechSession === session) voiceError(readableError(error.code));
+  } finally {
+    if (speechSession === session) {
+      speechSession = null;
+      updateComposer();
+      if (selectedId === session.contactId && !$('message-text').disabled) $('message-text').focus();
+    }
+  }
+}
+
+async function startDictation() {
+  const mimeType = recordingType();
+  if (!mimeType || !state?.speech?.ready || !contactFor(selectedId) || pending || sending || changingLanguage || speechSession) return;
+  const configuredMaximum = Number(state.speech.maxSeconds);
+  const session = {
+    contactId: selectedId, phase: 'permission', cancelled: false,
+    chunks: [], bytes: 0, stream: null, recorder: null, timer: null, deadline: null,
+    maxSeconds: Number.isFinite(configuredMaximum) ? Math.max(1, Math.min(60, configuredMaximum)) : 60,
+  };
+  speechSession = session;
+  $('voice-error').hidden = true;
+  updateComposer();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (session.cancelled || speechSession !== session) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    session.stream = stream;
+    session.recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64000 });
+    session.recorder.addEventListener('dataavailable', (event) => {
+      if (session.cancelled || speechSession !== session || !event.data.size) return;
+      session.bytes += event.data.size;
+      if (session.bytes > MAX_AUDIO_BYTES) {
+        cancelDictation('Запись превысила 8 МБ. Попробуйте более короткую фразу.');
+        return;
+      }
+      session.chunks.push(event.data);
+    });
+    session.recorder.addEventListener('stop', () => { void transcribeRecording(session); });
+    session.recorder.addEventListener('error', () => {
+      if (speechSession === session) cancelDictation('Запись прервалась. Повторите диктовку или введите текст вручную.');
+    });
+    session.startedAt = Date.now();
+    session.recorder.start(250);
+    session.phase = 'recording';
+    session.timer = setInterval(updateDictation, 500);
+    // Leave room for recorder scheduling and codec padding below the server's duration limit.
+    session.deadline = setTimeout(() => {
+      if (speechSession === session && session.phase === 'recording') stopDictation();
+    }, Math.max(1, session.maxSeconds - 1) * 1000);
+    updateComposer();
+  } catch (error) {
+    releaseMicrophone(session);
+    if (session.cancelled || speechSession !== session) return;
+    speechSession = null;
+    const text = error.name === 'NotAllowedError' || error.name === 'SecurityError'
+      ? 'Доступ к микрофону не разрешён. Разрешите его в браузере или введите текст вручную.'
+      : error.name === 'NotFoundError' ? 'Микрофон не найден. Подключите его или введите текст вручную.'
+        : 'Не удалось начать запись. Проверьте микрофон или введите текст вручную.';
+    voiceError(text);
+    updateComposer();
+  }
 }
 
 function resizeComposer() {
@@ -435,12 +647,35 @@ function resizeComposer() {
 }
 
 function openContactDialog() {
+  if (speechSession || changingLanguage) return;
   $('contact-error').hidden = true;
   $('contact-dialog').showModal();
   $('new-contact-name').focus();
 }
 
 $('add-contact').addEventListener('click', openContactDialog);
+$('start-dictation').addEventListener('click', () => { void startDictation(); });
+$('stop-dictation').addEventListener('click', stopDictation);
+$('cancel-dictation').addEventListener('click', () => { cancelDictation(); });
+$('contact-language').addEventListener('change', async () => {
+  const contact = contactFor(selectedId);
+  const language = $('contact-language').value;
+  if (!contact || speechSession || pending || sending || changingLanguage) return;
+  if (!languages().some((item) => item.code === language) || language === contact.language) return;
+  changingLanguage = { contactId: contact.id, language };
+  updateComposer();
+  try {
+    const response = await api('contact-language', changingLanguage);
+    const updated = response.contact || response;
+    if (updated.id === contact.id && state) state.contacts = state.contacts.map((item) => item.id === updated.id ? updated : item);
+    await poll();
+    toast('Язык собеседника сохранён. Уже отправленные сообщения сохраняют прежний перевод.');
+  } catch (error) { toast(readableError(error.code)); await poll(); }
+  finally {
+    changingLanguage = null;
+    if (state) render();
+  }
+});
 $('add-first-contact').addEventListener('click', openContactDialog);
 $('add-from-conversation').addEventListener('click', openContactDialog);
 $('open-connection').addEventListener('click', () => {
@@ -450,6 +685,7 @@ $('open-connection').addEventListener('click', () => {
 });
 $('close-contact-dialog').addEventListener('click', () => $('contact-dialog').close());
 $('back-to-chats').addEventListener('click', () => {
+  if (speechSession || changingLanguage) return;
   $('app').classList.remove('chat-open');
   [...$('contact-list').children].find((node) => node.dataset.contactId === selectedId)?.focus();
 });
@@ -479,7 +715,7 @@ $('contact-form').addEventListener('submit', async (event) => {
   $('save-contact').disabled = true;
   $('contact-error').hidden = true;
   try {
-    const response = await api('contacts', { name, phone: number });
+    const response = await api('contacts', { name, phone: number, language: $('new-contact-language').value || 'sr-Latn' });
     const contact = response.contact || response;
     await poll();
     if (!state?.contacts.some((item) => item.id === contact.id)) throw Object.assign(new Error('Contact not available'), { code: 'network' });
@@ -506,7 +742,7 @@ $('connect-button').addEventListener('click', async () => {
 
 $('compose-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if ($('send-button').disabled || pending || sending) return;
+  if ($('send-button').disabled || pending || sending || speechSession || changingLanguage) return;
   // Persist the exact command before the request: a lost HTTP response must never
   // create a new message identity or cause an automatic second send.
   const request = { contactId: selectedId, text: $('message-text').value, idempotencyKey: crypto.randomUUID(), createdAt: new Date().toISOString() };
@@ -563,6 +799,7 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && !loginRequired) void poll();
 });
 window.addEventListener('online', () => { if (!loginRequired) void poll(); });
+window.addEventListener('pagehide', () => { cancelDictation(); });
 if (selectedId) $('app').classList.add('chat-open');
 if (pending?.contactId === selectedId) $('message-text').value = pending.text;
 void poll();

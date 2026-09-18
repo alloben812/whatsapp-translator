@@ -3,9 +3,9 @@
 ## Product context
 
 - Preserve the owner's normal personal WhatsApp number and conversations.
-- Explicit owner command in Russian → Serbian message to the selected contact.
-- Incoming Serbian → Russian in the owner's interface only; no autonomous reply.
-- Serbian Latin is the proposed default, not a confirmed user preference.
+- Explicit owner command in Russian → the selected contact language message to the selected contact.
+- Incoming selected contact language → Russian in the owner's interface only; no autonomous reply.
+- Serbian Latin is the initial contact default; the owner can choose any supported contact language. Voice input is local Russian transcription, draft only.
 - Keep recipient selection deterministic and outside the model.
 
 ## Current state

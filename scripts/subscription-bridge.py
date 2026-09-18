@@ -54,7 +54,7 @@ def exact(value, fields):
 def validate_config(value):
     exact(value, ['provider', 'model', 'budgetMode', 'serbianScript'])
     require((value['provider'], value['model']) in (('claude', 'sonnet'), ('codex', 'gpt-5.5')))
-    require(value['budgetMode'] in ('subscription_limits', 'shared_daily_budget'))
+    require(value['budgetMode'] == 'subscription_limits')
     require(value['serbianScript'] in ('latin', 'cyrillic'))
     return dict(value)
 
@@ -354,9 +354,16 @@ class Bridge:
                             and len(translated['translation']) <= 8000)
                     attempted = False
                     return translated
+                # systemctl properties and cgroup.events are separate reads.
+                # During normal completion the cgroup may empty/disappear before
+                # the sampled unit state becomes terminal. Keep polling this
+                # same verified run; only confirmed stopped+successful above may
+                # produce a response. The overall deadline still bounds waiting.
                 require(state.get('identityVerified') is True
-                        and state.get('cgroupPopulated') is True
-                        and state.get('needsReconciliation') is False)
+                        and state.get('processStopped') is False
+                        and type(state.get('needsReconciliation')) is bool
+                        and (state.get('cgroupPopulated') is None
+                             or type(state.get('cgroupPopulated')) is bool))
                 self.runtime.guard()
                 self.sleep(0.4)
             raise Rejected()

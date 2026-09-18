@@ -195,6 +195,46 @@ class BrokerTest(unittest.TestCase):
             self.assertEqual(runtime.calls.count('cancel'), 1)
             self.assertTrue(runtime.closed)
 
+    def test_cgroup_completion_transition_waits_for_confirmed_same_run_result(self):
+        for populated in (False, None):
+            runtime, broker = self.new()
+            original = runtime.worker
+
+            def transitioning(action, run_id, *args, **kwargs):
+                value = original(action, run_id, *args, **kwargs)
+                if action == 'status' and runtime.calls.count('status') == 1:
+                    value.update(processStopped=False, cgroupPopulated=populated,
+                                 needsReconciliation=populated is None)
+                return value
+
+            runtime.worker = transitioning
+            self.assertEqual(broker.translate({
+                'text': 'Здравствуйте! Можно записаться на завтра в три часа дня?',
+                'sourceLanguage': 'ru', 'targetLanguage': 'en',
+            }), {'translation': 'Zdravo!'})
+            self.assertEqual(runtime.calls.count('start'), 1)
+            self.assertEqual(runtime.calls.count('status'), 2)
+            self.assertEqual(runtime.calls.count('result'), 1)
+            self.assertNotIn('cancel', runtime.calls)
+
+    def test_unverified_worker_identity_still_refuses_result(self):
+        runtime, broker = self.new()
+        original = runtime.worker
+
+        def unverified(action, run_id, *args, **kwargs):
+            value = original(action, run_id, *args, **kwargs)
+            if action == 'status':
+                value.update(identityVerified=False, processStopped=False,
+                             cgroupPopulated=None, needsReconciliation=True)
+            return value
+
+        runtime.worker = unverified
+        with self.assertRaises(bridge.Rejected):
+            broker.translate({'text': 'Привет', 'sourceLanguage': 'ru', 'targetLanguage': 'en'})
+        self.assertEqual(runtime.calls.count('start'), 1)
+        self.assertNotIn('result', runtime.calls)
+        self.assertNotIn('cancel', runtime.calls)
+
     def test_rejects_invalid_model_output(self):
         for response in ('not-json', '{}', '[]', '{"translation":"","recipient":"other"}',
                          '{"translation":"ok","recipient":"other"}'):
@@ -210,7 +250,7 @@ class BrokerTest(unittest.TestCase):
         self.assertEqual(bridge.validate_config(config), config)
         self.assertEqual(bridge.validate_config({**config, 'provider': 'codex', 'model': 'gpt-5.5'})['model'], 'gpt-5.5')
         for altered in ({'model': 'opus'}, {'model': 'gpt-6-astra'}, {'command': '/bin/sh'},
-                        {'budgetMode': 'unlimited'}, {'serbianScript': 'auto'}):
+                        {'budgetMode': 'unlimited'}, {'budgetMode': 'shared_daily_budget'}, {'serbianScript': 'auto'}):
             with self.assertRaises(bridge.Rejected):
                 bridge.validate_config({**config, **altered})
 

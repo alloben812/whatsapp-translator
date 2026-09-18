@@ -4,11 +4,11 @@
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0;min-width:320px}
-button,input,textarea{font:inherit}
+button,input,textarea,select{font:inherit}
 button,a,input,textarea{ -webkit-tap-highlight-color:transparent }
 button{cursor:pointer}
 button:disabled{cursor:not-allowed;opacity:.5}
-button,a,input,textarea{outline-offset:4px}
+button,a,input,textarea,select{outline-offset:4px}
 :focus-visible{outline:3px solid #84ad6d}
 button{border:0}
 a{color:inherit}
@@ -61,8 +61,9 @@ p,h1,h2{margin:0}
 .conversation-heading{min-width:0}
 .conversation-heading h1{font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .conversation-heading p{margin-top:5px;font-size:10px;color:#929c8a}
-.chat-language{margin-left:auto;border:1px solid #e7ebdf;border-radius:6px;padding:6px 8px;font-size:9px;color:#93a184;letter-spacing:.5px;white-space:nowrap}
-.chat-language span{padding:0 7px}
+.chat-language{margin-left:auto;max-width:190px;flex-shrink:0;font-size:9px;color:#849376;white-space:nowrap}
+.chat-language>span{display:block;margin-bottom:5px}
+.chat-language select{max-width:190px;padding:7px 24px 7px 8px;font-size:11px;min-height:32px}
 .back-button{display:none}
 .conversation-scroll{overflow-y:auto;overscroll-behavior:contain;padding:28px 32px;flex:1;min-height:0;scrollbar-width:thin;scrollbar-color:#dce3d3 transparent}
 .setup-panel{display:flex;align-items:center;justify-content:space-between;gap:24px;border:1px solid #e5e9da;background:#f5f7ed;border-radius:15px;padding:29px 30px;margin-bottom:24px}
@@ -143,7 +144,8 @@ textarea:disabled{opacity:.7}
 .dialog-heading h2{font-size:21px;font-weight:500;letter-spacing:-.5px}
 .muted{font-size:12px;line-height:1.7;color:#8c9981}
 .contact-dialog label,.login-card label{display:block;margin:23px 0 8px;font-size:12px;font-weight:500}
-input{width:100%;background:#f8faf2;border:1px solid #dfe5d5;padding:12px;border-radius:8px;color:var(--ink);min-height:44px;font-size:14px}
+input,select{width:100%;background:#f8faf2;border:1px solid #dfe5d5;padding:12px;border-radius:8px;color:var(--ink);min-height:44px;font-size:14px}
+select:disabled{opacity:.6;cursor:not-allowed}
 input::placeholder{color:#a5af9a}
 .input-help{font-size:10px;line-height:1.5;color:#a2ac98;margin-top:6px}
 .contact-dialog .primary{width:100%;margin-top:24px}
@@ -154,8 +156,20 @@ input::placeholder{color:#a5af9a}
 .login-card>.eyebrow{margin-top:27px}
 .login-card h1{font-size:29px;font-weight:500;letter-spacing:-1px;margin:12px 0}
 .login-card .primary{width:100%;margin-top:20px}
+.voice-toolbar{display:flex;align-items:center;gap:14px;margin-top:10px}
+.dictation-button{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;text-decoration:none;font-size:11px;min-height:28px}
+.voice-toolbar>span{font-size:9px;line-height:1.6;color:#8d9b81}
+.voice-status{display:flex;flex-wrap:wrap;align-items:center;gap:9px 14px;padding:11px 13px;margin-top:9px;border:1px solid #e0e5d5;background:#f2f5e9;border-radius:9px;font-size:11px;color:#657a52}
+.voice-status[data-phase=recording]{background:#fcf3e9;border-color:#ecdfcf;color:#946c42}
+.voice-status .button{font-size:10px;min-height:31px;padding:6px 10px}
+.voice-status .text-button{font-size:10px}
+.voice-status p{flex-basis:100%;font-size:9px;line-height:1.5;color:#929b87}
+#voice-timer{font-variant-numeric:tabular-nums;font-size:10px}
+#voice-error{margin-top:7px;font-size:10px}
 
 @media(min-width:1400px){.workspace{grid-template-columns:310px minmax(0,1fr)}.conversation-scroll{padding-left:48px;padding-right:48px}}
 @media(max-width:1050px){.app-shell{padding:0 22px}.workspace{grid-template-columns:240px minmax(0,1fr)}.sidebar-heading{padding:26px 20px}.sidebar-note{padding:24px 20px}.header-meta{gap:16px}.brand-caption{font-size:10px}.setup-panel{padding:24px;gap:20px}.setup-illustration{width:140px;height:148px}.illustration-bubble{font-size:18px;padding:16px}.qr-panel{width:190px}.setup-copy h2{font-size:26px}.conversation-scroll{padding:24px}.compose-form{padding:16px 22px}.compose-box{gap:8px}.send-button{padding:11px 12px;gap:8px;font-size:10px}.message{max-width:90%}.language-route{display:none}}
 @media(max-width:760px){.app-shell{padding:0;height:100dvh;min-height:0}.app-header{height:77px;padding:0 19px;gap:12px}.brand{gap:9px}.brand-mark{width:36px;height:36px;border-radius:11px 11px 11px 3px;font-size:28px;padding-bottom:7px}.brand strong{font-size:23px}.brand-caption{font-size:9px;letter-spacing:0}.header-meta{gap:8px}.connection-status{font-size:9px;gap:6px}.demo-label{font-size:8px;padding:3px 5px}.status-dot{width:6px;height:6px}.workspace{grid-template-columns:1fr;border-radius:0;border-left:0;border-right:0;box-shadow:none}.sidebar{display:flex;border:0}.conversation{display:none}.app-shell.chat-open .sidebar{display:none}.app-shell.chat-open .conversation{display:flex}.sidebar-heading{padding:24px}.sidebar h2{font-size:24px}.contact-list{padding:0 14px}.contact-button{padding:17px 13px}.contact-name{font-size:15px}.contact-preview{font-size:12px}.contact-time{font-size:10px}.avatar{width:45px;height:45px}.sidebar-note{font-size:11px;padding:25px}.empty-contacts{padding:28px;font-size:14px;max-width:290px}.empty-contacts p{font-size:18px}.empty-contacts .text-button{font-size:13px}.conversation-header{min-height:74px;padding:15px 17px;gap:10px}.back-button{display:grid;width:27px;margin-left:-4px;font-size:22px}.header-avatar{width:34px;height:34px;border-radius:10px}.conversation-heading h1{font-size:14px}.conversation-heading p{font-size:10px}.chat-language{font-size:8px;padding:5px 6px}.chat-language span{padding:0 4px}.conversation-scroll{padding:20px 17px}.setup-panel{padding:22px;gap:18px}.setup-copy h2{font-size:25px}.setup-copy>.eyebrow{font-size:8px;letter-spacing:1.2px}.setup-copy>p:not(.eyebrow):not(.form-error){font-size:11px}.setup-copy .button{font-size:11px;padding:10px 12px;gap:12px}.setup-illustration{display:none}.qr-panel{width:160px}.qr-panel p{font-size:9px}.setup-panel:has(.qr-panel:not([hidden])){flex-direction:column;align-items:flex-start}.setup-panel:has(.qr-panel:not([hidden])) .setup-copy h2{font-size:23px}.setup-panel:has(.qr-panel:not([hidden])) .qr-panel{align-self:center;width:208px}.setup-panel:has(.qr-panel:not([hidden])) .qr-panel p{font-size:10px}.empty-conversation{min-height:220px;padding:20px 5px}.empty-conversation h2{font-size:22px}.message{max-width:91%}.message-bubble{padding:13px 15px}.message-list{gap:18px}.message-original,.incoming .message-translation{font-size:14px}.message-translation,.incoming .message-original{font-size:12px}.compose-form{padding:14px 16px max(14px,env(safe-area-inset-bottom))}.compose-topline{font-size:9px;margin-bottom:9px}.compose-topline label span{display:none}.compose-box{display:block;padding:10px}.compose-box textarea{font-size:16px;min-height:42px;line-height:1.5;padding:3px}.send-button{margin-top:6px;min-height:39px;width:100%;font-size:11px;justify-content:space-between;padding:10px 13px}.compose-help{font-size:8px;margin-top:7px}.pending-notice{margin:0 14px 10px;display:block;font-size:10px}.pending-notice .button{margin-top:8px;width:100%}.network-notice{margin:10px 14px 0;font-size:10px}.app-footer{display:none}.toast{bottom:max(18px,env(safe-area-inset-bottom))}.contact-dialog{padding:24px}.contact-dialog input{font-size:16px}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+@media(max-width:760px){.conversation-heading{flex:1}.chat-language{max-width:140px;padding:0;letter-spacing:0}.chat-language>span{font-size:8px;padding:0;margin-bottom:4px}.chat-language select{max-width:140px;min-height:32px;font-size:11px;padding:6px 18px 6px 7px}.voice-toolbar{gap:10px;margin-top:6px}.voice-toolbar>span{font-size:8px}.dictation-button{font-size:10px}.voice-status{padding:9px 10px;gap:7px 10px;font-size:10px}.voice-status p{font-size:8px}.contact-dialog select{font-size:16px}}
+@media(max-width:380px){.header-avatar{display:none}.chat-language,.chat-language select{max-width:132px}}
