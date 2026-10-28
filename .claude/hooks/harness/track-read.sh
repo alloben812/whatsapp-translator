@@ -25,7 +25,7 @@ fi
 [ -n "$REPO" ] || REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 LOG="${VERIFY_READ_LOG:-$REPO/.claude/.evidence-reads}"
 
-EVIDENCE_RE="${EVIDENCE_RE:-(/evidence/|(^|/)evidence[^/]*$|/checkpoints/|/проверка-|/отчёт|/отчет|/snapshot/|/снимок|/журнал|/logs?/|/логи?/|\.log$|\.png$|\.jpg$|\.jpeg$|\.vtt$|/прогон|/results?/|/результат|test-results\.json$|STATE\.json$|state\.json$)}"
+EVIDENCE_RE="${EVIDENCE_RE:-(/evidence/|(^|/)evidence[^/]*$|/checkpoints/|/проверка-|/отчёт|/отчет|/snapshot/|/снимок|/журнал|/logs?/|/логи?/|\.log$|\.png$|\.jpg$|\.jpeg$|\.vtt$|/прогон|/results?/|/результат|/artifacts/|verdict\.json$|test-results\.json$|STATE\.json$|state\.json$)}"
 
 candidates=""
 if [ "$TOOL" = "Bash" ]; then

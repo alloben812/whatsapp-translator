@@ -38,7 +38,7 @@ if [ -s "$LOG" ]; then
   fresh="$(find "$LOG" -mmin "-${WINDOW_MIN}" 2>/dev/null || true)"
 fi
 if [ -z "$fresh" ]; then
-  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Файл состояния менять нельзя: за последние "+sys.argv[1]+" минут в этой сессии не открыт ни один файл-доказательство (артефакт прогона, лог, чекпоинт, скриншот, снимок). Сначала прочитай доказательство (Read или cat), затем повтори запись. Правило: меняются только status и evidence, формулировки пунктов неизменяемы."}}, ensure_ascii=False))' "$WINDOW_MIN"
+  python3 -c 'import json,sys; print(json.dumps({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Файл состояния менять нельзя: за последние "+sys.argv[1]+" минут в этом checkout не открыт ни один файл-доказательство (артефакт прогона, лог, чекпоинт, скриншот, снимок). Сначала прочитай доказательство (Read или cat), затем повтори запись. Правило: меняются только status и evidence, формулировки пунктов неизменяемы."}}, ensure_ascii=False))' "$WINDOW_MIN"
   exit 0
 fi
 exit 0

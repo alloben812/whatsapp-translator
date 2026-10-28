@@ -15,6 +15,8 @@ export const meta = {
   ],
 }
 
+// Модели по РЕШЕНИЕ.md (тема 3, п.6): читатели и скептики sonnet, критик opus,
+// синтез в окне оператора или opus с комментарием, почему не в окне.
 // Параметры прогона приходят через args (Workflow({ args: {...} })).
 // Пример: { wt: '/абсолютный/путь/к/worktree', today: '2026-10-28', budgetTokens: 1500000, maxAgents: 12 }
 const WT = (args && args.wt) || '.'
@@ -23,8 +25,8 @@ const MAX_AGENTS = (args && args.maxAgents) || 12
 const RESERVE = 80000 // токенов на синтез и критика, не тратить на разведку
 
 const COMMON = `Репозиторий: ${WT}. Сегодня ${TODAY}. Работаешь только на чтение.
-Каждое утверждение с путём к файлу и строкой. Факты проверяй по git и файлам,
-не по фокусу и не по HANDOFF: оба могут быть устаревшими. У каждого источника
+Каждое утверждение с путём к файлу и строкой. Факты проверяй по git и файлам;
+фокус и HANDOFF могут быть устаревшими и доказательством не считаются. У каждого источника
 укажи дату и пометку «снимок» или «живое». Не выдумывай: чего нет в файлах,
 того нет. Отвечай по-русски.`
 
@@ -76,7 +78,7 @@ const ZONES = [
 log(`Разведка: ${ZONES.length} зон, бюджет ${budget.total ? budget.total : 'не задан'}`)
 const scouting = (await parallel(ZONES.map(z => () =>
   enoughBudget(`разведка ${z.key}`)
-    ? agent(`${COMMON}\n\n${z.prompt}`, { label: `разведка:${z.key}`, phase: 'Разведка', schema: FINDINGS })
+    ? agent(`${COMMON}\n\n${z.prompt}`, { label: `разведка:${z.key}`, phase: 'Разведка', schema: FINDINGS, model: 'sonnet' })
     : Promise.resolve(null)
 ))).filter(Boolean)
 if (scouting.length < ZONES.length) log(`Пропущено зон: ${ZONES.length - scouting.length} (бюджет или сбой)`)
@@ -84,7 +86,7 @@ if (scouting.length < ZONES.length) log(`Пропущено зон: ${ZONES.leng
 phase('Синтез')
 const synth = enoughBudget('синтез')
   ? await agent(`${COMMON}\n\nСобери карту из результатов разведки (JSON ниже). Кандидаты нумеруй.\n${JSON.stringify(scouting)}`,
-      { label: 'синтез', phase: 'Синтез', schema: FINDINGS })
+      { label: 'синтез', phase: 'Синтез', schema: FINDINGS, model: 'opus' }) // синтез агентом, не в окне: прогон идёт без оператора
   : null
 const candidates = (synth && synth.items) ? synth.items.slice(0, MAX_AGENTS) : []
 if (synth && synth.items && synth.items.length > candidates.length) log(`Кандидатов отброшено по лимиту агентов: ${synth.items.length - candidates.length}`)
@@ -98,7 +100,7 @@ const judged = await parallel(candidates.map(c => () =>
   parallel(LENSES.map((lens, i) => () =>
     enoughBudget(`скептик ${i + 1}`)
       ? agent(`${COMMON}\n\nКандидат: ${JSON.stringify(c)}\nТы скептик, ${lens}. Если не уверен, refuted=true.`,
-          { label: `скептик${i + 1}`, phase: 'Проверка', schema: VERDICT })
+          { label: `скептик${i + 1}`, phase: 'Проверка', schema: VERDICT, model: 'sonnet' })
       : Promise.resolve(null)
   )).then(votes => ({ candidate: c, votes: votes.filter(Boolean) }))
 ))
@@ -107,7 +109,7 @@ phase('Критик')
 const critic = !enoughBudget('критик') ? null : await agent(`${COMMON}\n\nТы критик полноты и калибровки. Ниже кандидаты и вердикты скептиков.
 Найди: где скептики противоречат друг другу, где вердикт опирается на устаревший
 источник, что не прочитано. Единодушие судей без разбора расхождений не считается
-качеством.\n${JSON.stringify(judged)}`, { label: 'критик', phase: 'Критик', schema: CRITIC })
+качеством.\n${JSON.stringify(judged)}`, { label: 'критик', phase: 'Критик', schema: CRITIC, model: 'opus' })
 
 return { scouting, synth, judged, critic, dropped_zones: ZONES.length - scouting.length }
 // После завершения оператор пишет в HANDOFF строку «Прогоны»: дата, runId,

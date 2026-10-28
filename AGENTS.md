@@ -41,9 +41,3 @@ Current handoff: paused at the owner's request until tomorrow; read `docs/resume
 ## Cross-computer continuation
 
 Use docs/access-and-handoff.md. GitHub carries code. Existing model sessions stay on the server; SSH private keys stay on the user's computers. Record only paths or aliases needed for access, not credentials.
-
-<!-- harness-kit:start -->
-## Харнесс-кит (версия 1.0.0, 2026-10-28)
-
-Правила окна общие с Claude Code, полный текст в блоке «Харнесс-кит» в `CLAUDE.md`. Коротко: (1) контракт до работы: Результат / Не делаем / Готово когда / Останавливаюсь если / Кто принимает / Бюджет; (2) «готово» и PR только после скептической проверки по контракту и открытого артефакта; (3) конец хода текстом при открытых пунктах не завершение; (4) формулировки критериев не редактируются, в state-файлах меняются только status и evidence; (5) соло сначала, бюджет прогона записан, после прогона строка в HANDOFF «Прогоны»; (6) после многосудейной фазы критик расхождений; (7) верх HANDOFF из четырёх блоков, история отдельно; (8) merge, push в main, force-push только по явному ОК; (9) ревизия правил при смене модели. У Codex работает только SessionStart-хук (`.claude/hooks/harness/session-start-harness.sh`), остальные правила исполняются по этому тексту. Шаблоны: `.claude/harness-kit/templates/`.
-<!-- harness-kit:end -->
