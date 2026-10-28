@@ -82,8 +82,10 @@ const scouting = (await parallel(ZONES.map(z => () =>
 if (scouting.length < ZONES.length) log(`Пропущено зон: ${ZONES.length - scouting.length} (бюджет или сбой)`)
 
 phase('Синтез')
-const synth = await agent(`${COMMON}\n\nСобери карту из результатов разведки (JSON ниже). Кандидаты нумеруй.\n${JSON.stringify(scouting)}`,
-  { label: 'синтез', phase: 'Синтез', schema: FINDINGS })
+const synth = enoughBudget('синтез')
+  ? await agent(`${COMMON}\n\nСобери карту из результатов разведки (JSON ниже). Кандидаты нумеруй.\n${JSON.stringify(scouting)}`,
+      { label: 'синтез', phase: 'Синтез', schema: FINDINGS })
+  : null
 const candidates = (synth && synth.items) ? synth.items.slice(0, MAX_AGENTS) : []
 if (synth && synth.items && synth.items.length > candidates.length) log(`Кандидатов отброшено по лимиту агентов: ${synth.items.length - candidates.length}`)
 
@@ -102,7 +104,7 @@ const judged = await parallel(candidates.map(c => () =>
 ))
 
 phase('Критик')
-const critic = await agent(`${COMMON}\n\nТы критик полноты и калибровки. Ниже кандидаты и вердикты скептиков.
+const critic = !enoughBudget('критик') ? null : await agent(`${COMMON}\n\nТы критик полноты и калибровки. Ниже кандидаты и вердикты скептиков.
 Найди: где скептики противоречат друг другу, где вердикт опирается на устаревший
 источник, что не прочитано. Единодушие судей без разбора расхождений не считается
 качеством.\n${JSON.stringify(judged)}`, { label: 'критик', phase: 'Критик', schema: CRITIC })

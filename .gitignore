@@ -30,3 +30,6 @@ creds.json
 .DS_Store
 __pycache__/
 *.py[cod]
+
+# харнесс-кит: журнал прочитанных доказательств (verify-gate)
+.claude/.evidence-reads

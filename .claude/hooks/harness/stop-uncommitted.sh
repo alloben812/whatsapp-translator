@@ -10,14 +10,20 @@ INPUT="$(cat 2>/dev/null || true)"
 if printf '%s' "$INPUT" | grep -q '"stop_hook_active": *true'; then
   exit 0
 fi
-
-REPO="${CLAUDE_PROJECT_DIR:-}"
-if [ -z "$REPO" ]; then
-  REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+CWD="$(printf '%s' "$INPUT" | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('cwd',''))
+except Exception: print('')" 2>/dev/null || true)"
+REPO=""
+if [ -n "$CWD" ] && [ -d "$CWD" ]; then
+  REPO="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
+[ -n "$REPO" ] || REPO="${CLAUDE_PROJECT_DIR:-}"
+[ -n "$REPO" ] || REPO="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[ -n "$REPO" ] || exit 0
 cd "$REPO" 2>/dev/null || exit 0
 
-BRANCH="$(git branch --show-current 2>/dev/null || echo '?')"
+BRANCH="$(git branch --show-current 2>/dev/null || true)"
+[ -n "$BRANCH" ] || BRANCH="detached@$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 DIRTY="$(git status --porcelain --untracked-files=normal 2>/dev/null | wc -l | tr -d ' ')"
 if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
   AHEAD="$(git rev-list --count '@{u}..HEAD' 2>/dev/null || echo 0)"

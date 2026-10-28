@@ -8,25 +8,38 @@
 set -u
 
 INPUT="$(cat 2>/dev/null || true)"
-SOURCE="$(printf '%s' "$INPUT" | python3 -c "import json,sys
-try: print(json.load(sys.stdin).get('source',''))
-except Exception: print('')" 2>/dev/null || true)"
+META="$(printf '%s' "$INPUT" | python3 -c "import json,sys
+try:
+    d=json.load(sys.stdin); print(d.get('source','')); print(d.get('cwd',''))
+except Exception:
+    print(''); print('')" 2>/dev/null || printf '\n\n')"
+SOURCE="$(printf '%s\n' "$META" | sed -n '1p')"
+CWD="$(printf '%s\n' "$META" | sed -n '2p')"
 if [ "$SOURCE" = "compact" ]; then
   exit 0
 fi
 
-REPO="${CLAUDE_PROJECT_DIR:-}"
-if [ -z "$REPO" ]; then
-  REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Корень репозитория: cwd из события (верно и для worktree), затем CLAUDE_PROJECT_DIR, затем git.
+REPO=""
+if [ -n "$CWD" ] && [ -d "$CWD" ]; then
+  REPO="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
+[ -n "$REPO" ] || REPO="${CLAUDE_PROJECT_DIR:-}"
+[ -n "$REPO" ] || REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO" 2>/dev/null || exit 0
 
-BRANCH="$(git branch --show-current 2>/dev/null || echo '?')"
+# Журнал доказательств verify-gate живёт одну сессию: на startup и clear обнуляем.
+if [ "$SOURCE" = "startup" ] || [ "$SOURCE" = "clear" ]; then
+  [ -d .claude ] && : > .claude/.evidence-reads 2>/dev/null || true
+fi
+
+BRANCH="$(git branch --show-current 2>/dev/null || true)"
+[ -n "$BRANCH" ] || BRANCH="detached@$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
 DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
 HOUR="$(date +%H)"
 
 echo "=== 🔧 ХАРНЕСС: состояние окна ==="
-echo "Ветка: ${BRANCH:-?} · незакоммиченных файлов: ${DIRTY:-0} · локальное время: $(date '+%H:%M')"
+echo "Ветка: ${BRANCH} · незакоммиченных файлов: ${DIRTY:-0} · локальное время: $(date '+%H:%M')"
 if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
   echo "Правило: правки только в отдельной ветке и через PR. Создай ветку до первой правки."
 fi
@@ -35,14 +48,15 @@ if [ "${HOUR#0}" -ge 20 ] 2>/dev/null || [ "${HOUR#0}" -lt 7 ] 2>/dev/null; then
 fi
 
 # Стопки указателей: больше одного заголовка «читать первым / актуальная точка»
-# в одном HANDOFF или стартовом промпте.
-STACK_RE='читать первым|Читать первым|ЧИТАТЬ ПЕРВЫМ|читай первым|ктуальн[а-я]* [а-я ]*точк|Текущая точка|ТЕКУЩАЯ ТОЧКА|Сначала прочитай|СНАЧАЛА ПРОЧИТАЙ'
+# в одном HANDOFF или стартовом промпте. Локаль C: без диапазонов кириллицы,
+# та же форма, что в scripts/lint/lint.py (STACK_HEADER_RE).
+STACK_RE='читать первым|Читать первым|ЧИТАТЬ ПЕРВЫМ|читай первым|(^|[ #*_])(Актуальн|актуальн)[^ ]* (контрольн[^ ]* )?точка|Текущая точка|ТЕКУЩАЯ ТОЧКА|Сначала прочитай|СНАЧАЛА ПРОЧИТАЙ'
 found=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
-  n="$(grep -E -c "^#+ .*(${STACK_RE})" "$f" 2>/dev/null || true)"
+  n="$(LC_ALL=C grep -E -c "^#+.*(${STACK_RE})" "$f" 2>/dev/null || true)"
   n="${n:-0}"
-  if [ "${n:-0}" -ge 2 ]; then
+  if [ "$n" -ge 2 ] 2>/dev/null; then
     found=1
     echo "Стопка указателей: $f · $n заголовков. Сверни верх в четыре блока (Сейчас / Сделано, не повторять / Дальше / Решения владельца), историю в HANDOFF-история.md."
   fi
@@ -51,6 +65,6 @@ if [ "$found" -eq 0 ]; then
   echo "Стопок «читать первым» в HANDOFF и стартовых промптах нет."
 fi
 
-echo "Контракт: до первого действия проверь в стартовом промпте пять строк (Результат / Не делаем / Готово когда / Останавливаюсь если / Кто принимает) и строку «Бюджет». Если их нет, допиши по scripts/окружение/harness-kit/templates/СТАРТ-шаблон.md и спроси владельца, верно ли."
-echo "Конец хода текстом при открытых пунктах не считается завершением: если пункты контракта открыты и ничто не блокирует, делай следующий шаг."
+echo "Контракт: до первого действия проверь в стартовом промпте пять строк (Результат / Не делаем / Готово когда / Останавливаюсь если / Кто принимает) и строку «Бюджет». Если их нет, допиши по .claude/harness-kit/templates/СТАРТ-шаблон.md и спроси владельца, верно ли."
+echo "Конец хода текстом при открытых пунктах не считается завершением: если пункты контракта открыты и ничто не требует решения владельца, делай следующий шаг."
 exit 0
