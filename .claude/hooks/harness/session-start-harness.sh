@@ -2,9 +2,8 @@
 # Харнесс-кит, SessionStart. Только чтение, никогда не блокирует старт.
 # Печатает: ветку и незакоммиченное, стопки «читать первым» в HANDOFF и
 # стартовых промптах, напоминание про контракт и бюджет прогона.
-# Зачем: формат хэндоффа без принудителя возвращается к прежнему виду (TMMi:
-# шесть заголовков-указателей через месяц после консолидации 04.09). Хук делает стопку
-# видимой на каждом старте, пока она не свёрнута.
+# Зачем: формат хэндоффа без принудителя разъезжается (несколько заголовков
+# «читать первым» в одном файле). Хук делает стопку видимой на каждом старте.
 set -u
 
 INPUT="$(cat 2>/dev/null || true)"
@@ -28,29 +27,40 @@ fi
 [ -n "$REPO" ] || REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 cd "$REPO" 2>/dev/null || exit 0
 
-# Журнал доказательств verify-gate живёт одну сессию: на startup и clear обнуляем.
+# Журнал доказательств verify-gate живёт одну сессию: на startup и clear обнуляем
+# (только если гейт установлен или журнал уже есть; иначе файл не создаём).
 if [ "$SOURCE" = "startup" ] || [ "$SOURCE" = "clear" ]; then
-  [ -d .claude ] && : > .claude/.evidence-reads 2>/dev/null || true
+  if [ -f .claude/hooks/harness/verify-gate.sh ] || [ -f .claude/.evidence-reads ]; then
+    : > .claude/.evidence-reads 2>/dev/null || true
+  fi
 fi
 
 BRANCH="$(git branch --show-current 2>/dev/null || true)"
 [ -n "$BRANCH" ] || BRANCH="detached@$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
-DIRTY="$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+DIRTY="$(git status --porcelain --untracked-files=all 2>/dev/null | wc -l | tr -d ' ')"
 HOUR="$(date +%H)"
+
+# Основные ветки (через запятую): HARNESS_BASE_BRANCH, файл base-branch, origin/HEAD, иначе main и master.
+BASE="${HARNESS_BASE_BRANCH:-}"
+[ -n "$BASE" ] || { [ -f .claude/harness-kit/base-branch ] && BASE="$(head -1 .claude/harness-kit/base-branch | tr -d ' \r')"; } || true
+[ -n "$BASE" ] || BASE="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)"
+[ -n "$BASE" ] || BASE="main,master"
+on_base=0
+case ",$BASE," in *",$BRANCH,"*) on_base=1 ;; esac
 
 echo "=== 🔧 ХАРНЕСС: состояние окна ==="
 echo "Ветка: ${BRANCH} · незакоммиченных файлов: ${DIRTY:-0} · локальное время: $(date '+%H:%M')"
-if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+if [ "$on_base" -eq 1 ] && [ -f .claude/hooks/harness/merge-guard.sh ]; then
   echo "Правило: правки только в отдельной ветке и через PR. Создай ветку до первой правки."
 fi
-if [ ! -f .claude/harness-kit/no-night-rule ] && { [ "${HOUR#0}" -ge 20 ] 2>/dev/null || [ "${HOUR#0}" -lt 7 ] 2>/dev/null; }; then
-  echo "Бюджет: после 20:00 прогоны дольше 20 минут только после вопроса владельцу про квоту."
+# Правило вечернего бюджета включается флагом --night-rule (маркер night-rule); действует с 20:00 до 07:00.
+if [ -f .claude/harness-kit/night-rule ] && { [ "${HOUR#0}" -ge 20 ] 2>/dev/null || [ "${HOUR#0}" -lt 7 ] 2>/dev/null; }; then
+  echo "Бюджет: с 20:00 до 07:00 прогоны дольше 20 минут только после вопроса владельцу про квоту."
 fi
 
 # Стопки указателей: больше одного заголовка «читать первым / актуальная точка»
-# в одном HANDOFF или стартовом промпте. Локаль C: без диапазонов кириллицы,
-# та же форма, что в scripts/lint/lint.py (STACK_HEADER_RE).
-STACK_RE='читать первым|Читать первым|ЧИТАТЬ ПЕРВЫМ|читай первым|(^|[ #*_])(Актуальн|актуальн)[^ ]* (контрольн[^ ]* )?точка|Текущая точка|ТЕКУЩАЯ ТОЧКА|Сначала прочитай|СНАЧАЛА ПРОЧИТАЙ'
+# в одном HANDOFF или стартовом промпте. Локаль C: без диапазонов кириллицы.
+STACK_RE='читать первым|Читать первым|ЧИТАТЬ ПЕРВЫМ|читай первым|(^|[ #*_])(Актуальн|актуальн)[^ ]* (контрольн[^ ]* )?точка|Текущая точка|ТЕКУЩАЯ ТОЧКА|Сначала прочитай|СНАЧАЛА ПРОЧИТАЙ|read first|Read first|READ FIRST'
 found=0
 while IFS= read -r f; do
   [ -f "$f" ] || continue
@@ -58,7 +68,7 @@ while IFS= read -r f; do
   n="${n:-0}"
   if [ "$n" -ge 2 ] 2>/dev/null; then
     found=1
-    echo "Стопка указателей: $f · $n заголовков. Сверни верх в четыре блока (Сейчас / Сделано, не повторять / Дальше / Решения владельца), историю в HANDOFF-история.md."
+    echo "Стопка указателей: $f · $n заголовков. Сверни верх в четыре блока (Сейчас / Сделано, не повторять / Дальше / Решения владельца), историю в файл истории, принятый в репозитории (по умолчанию HANDOFF-история.md)."
   fi
 done < <( { git -c core.quotepath=false ls-files -- '*HANDOFF.md' '.claude/commands/*.md' 2>/dev/null; [ -f .claude/harness-kit/entry-files ] && grep -v '^#' .claude/harness-kit/entry-files; } | sort -u)
 if [ "$found" -eq 0 ]; then
